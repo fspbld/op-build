@@ -20,10 +20,10 @@ config BR2_PACKAGE_PETITBOOT
 comment "petitboot requires udev to be enabled"
 	depends on !BR2_PACKAGE_HAS_UDEV
 
-
 config BR2_PACKAGE_PETITBOOT_MTD
 	bool "petitboot-mtd"
 	depends on BR2_PACKAGE_PETITBOOT
+	select BR2_PACKAGE_LIBFLASH
 	help
 	  Adds Petitboot support for MTD devices
 
