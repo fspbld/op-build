@@ -1,0 +1,138 @@
+From 059bbd3a8bfd16393dfa205b8cb79105cf63ef38 Mon Sep 17 00:00:00 2001
+From: Matt Spinler <spinler@us.ibm.com>
+Date: Fri, 5 Feb 2016 10:35:21 -0600
+Subject: [PATCH] Support Provisioning PNOR partition XML element.
+
+If the element is present, set a flag in the PNOR TOC. Other
+code, like BMC code, would then erase these partitions when
+the system is reprovisioned.
+
+RTC: 143305
+Forwardport: yes
+Change-Id: I457895f65d81e0a971bf301f16be2921dc21a24a
+Reviewed-on: http://gfw160.aus.stglabs.ibm.com:8080/gerrit/24133
+Tested-by: Jenkins Server
+Reviewed-by: STEPHEN M. CPREK <smcprek@us.ibm.com>
+Tested-by: Jenkins OP Build CI
+Tested-by: Jenkins OP HW
+Reviewed-by: MATTHEW A. PLOETZ <maploetz@us.ibm.com>
+Tested-by: FSP CI Jenkins
+Reviewed-by: Daniel M. Crowell <dcrowell@us.ibm.com>
+---
+ src/build/buildpnor/buildpnor.pl | 8 +++++++-
+ src/include/usr/pnor/pnorif.H    | 7 ++++---
+ src/usr/pnor/common/ffs_hb.H     | 5 +++--
+ src/usr/pnor/pnorrp.C            | 4 +++-
+ 4 files changed, 17 insertions(+), 7 deletions(-)
+
+diff --git a/src/build/buildpnor/buildpnor.pl b/src/build/buildpnor/buildpnor.pl
+index 116c779..7d11f61 100755
+--- a/src/build/buildpnor/buildpnor.pl
++++ b/src/build/buildpnor/buildpnor.pl
+@@ -6,7 +6,7 @@
+ #
+ # OpenPOWER HostBoot Project
+ #
+-# Contributors Listed Below - COPYRIGHT 2012,2015
++# Contributors Listed Below - COPYRIGHT 2012,2016
+ # [+] International Business Machines Corp.
+ #
+ #
+@@ -215,6 +215,7 @@ sub loadPnorLayout
+         my $sha512Version = (exists $sectionEl->{sha512Version} ? "yes" : "no");
+         my $sha512perEC = (exists $sectionEl->{sha512perEC} ? "yes" : "no");
+         my $preserved = (exists $sectionEl->{preserved} ? "yes" : "no");
++        my $reprovision = (exists $sectionEl->{reprovision} ? "yes" : "no");
+         my $readOnly = (exists $sectionEl->{readOnly} ? "yes" : "no");
+         if (($testRun == 0) && ($sectionEl->{testonly}[0] eq "yes"))
+         {
+@@ -235,6 +236,7 @@ sub loadPnorLayout
+         $$i_pnorLayoutRef{sections}{$physicalOffset}{sha512Version} = $sha512Version;
+         $$i_pnorLayoutRef{sections}{$physicalOffset}{sha512perEC} = $sha512perEC;
+         $$i_pnorLayoutRef{sections}{$physicalOffset}{preserved} = $preserved;
++        $$i_pnorLayoutRef{sections}{$physicalOffset}{reprovision} = $reprovision;
+         $$i_pnorLayoutRef{sections}{$physicalOffset}{readOnly} = $readOnly;
+ 
+         #store the physical offsets of each section in a hash, so, it is easy
+@@ -399,6 +401,10 @@ sub addUserData
+     {
+         $miscFlags |= 0x40;
+     }
++    if( ($i_sectionHash{$i_key}{reprovision} eq "yes") )
++    {
++        $miscFlags |= 0x10;
++    }
+ 
+     #First User Data Word
+     #[1:chip][1:compressType][2:dataInteg]
+diff --git a/src/include/usr/pnor/pnorif.H b/src/include/usr/pnor/pnorif.H
+index 79a9a0f..efddbc4 100644
+--- a/src/include/usr/pnor/pnorif.H
++++ b/src/include/usr/pnor/pnorif.H
+@@ -5,7 +5,7 @@
+ /*                                                                        */
+ /* OpenPOWER HostBoot Project                                             */
+ /*                                                                        */
+-/* Contributors Listed Below - COPYRIGHT 2011,2015                        */
++/* Contributors Listed Below - COPYRIGHT 2011,2016                        */
+ /* [+] Google Inc.                                                        */
+ /* [+] International Business Machines Corp.                              */
+ /*                                                                        */
+@@ -86,8 +86,9 @@ struct SectionInfo_t
+     uint64_t size;      /**< Size of partition in bytes */
+     bool eccProtected;  /**< Section is ECC protected */
+     bool sha512Version; /**< Version Checking */
+-    bool sha512perEC; /**< Version Checking perEC */
+-    bool readOnly; /**< Section is read only */
++    bool sha512perEC;   /**< Version Checking perEC */
++    bool readOnly;      /**< Section is read only */
++    bool reprovision;   /**< Erase this section during a reprovision */
+ };
+ 
+ /**
+diff --git a/src/usr/pnor/common/ffs_hb.H b/src/usr/pnor/common/ffs_hb.H
+index 23070a2..89f67b3 100644
+--- a/src/usr/pnor/common/ffs_hb.H
++++ b/src/usr/pnor/common/ffs_hb.H
+@@ -5,7 +5,7 @@
+ /*                                                                        */
+ /* OpenPOWER HostBoot Project                                             */
+ /*                                                                        */
+-/* Contributors Listed Below - COPYRIGHT 2012,2015                        */
++/* Contributors Listed Below - COPYRIGHT 2012,2016                        */
+ /* [+] International Business Machines Corp.                              */
+ /*                                                                        */
+ /*                                                                        */
+@@ -67,8 +67,9 @@ enum
+     FFS_MISC_PRESERVED     = 0x80,    /**< Preserved across code updates */
+     FFS_MISC_READ_ONLY     = 0x40,    /**< Read only section */
+     FFS_MISC_PSEUDO        = 0x20,    /**< Pseudo partition */
++    FFS_MISC_REPROVISION   = 0x10,    /**< Erased during reprovision */
+     FFS_MISC_GOLDEN        = 0x01,    /**< Golden side of PNOR */
+-    FFS_MISC_UNUSED        = 0x1E,    /**< Unused MISC Flags */
++    FFS_MISC_UNUSED        = 0x0E,    /**< Unused MISC Flags */
+ };
+ 
+ /**
+diff --git a/src/usr/pnor/pnorrp.C b/src/usr/pnor/pnorrp.C
+index a887e8a..3b3c693 100644
+--- a/src/usr/pnor/pnorrp.C
++++ b/src/usr/pnor/pnorrp.C
+@@ -5,7 +5,7 @@
+ /*                                                                        */
+ /* OpenPOWER HostBoot Project                                             */
+ /*                                                                        */
+-/* Contributors Listed Below - COPYRIGHT 2011,2015                        */
++/* Contributors Listed Below - COPYRIGHT 2011,2016                        */
+ /* [+] Google Inc.                                                        */
+ /* [+] International Business Machines Corp.                              */
+ /*                                                                        */
+@@ -442,6 +442,8 @@ errlHndl_t PnorRP::getSectionInfo( PNOR::SectionId i_section,
+                                != 0) ? true : false;
+         o_info.readOnly = ((iv_TOC[id].misc & FFS_MISC_READ_ONLY)
+                                != 0) ? true : false;
++        o_info.reprovision = ((iv_TOC[id].misc & FFS_MISC_REPROVISION)
++                               != 0) ? true : false;
+     }
+ 
+     return l_errhdl;
