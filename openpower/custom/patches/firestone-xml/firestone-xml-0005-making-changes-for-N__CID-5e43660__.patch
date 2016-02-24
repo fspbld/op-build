@@ -1,0 +1,27 @@
+From 5e43660f72e3ee736dd985e639b099a1be1730da Mon Sep 17 00:00:00 2001
+From: Cakici <cakici@lcb343.aus.stglabs.ibm.com>
+Date: Fri, 19 Feb 2016 11:41:59 -0600
+Subject: [PATCH] making changes for N and N+1 power supply settings
+
+---
+ firestone.xml | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/firestone.xml b/firestone.xml
+index 115303b..909ac65 100644
+--- a/firestone.xml
++++ b/firestone.xml
+@@ -5436,11 +5436,11 @@
+ 	</attribute>
+ 	<attribute>
+ 		<id>OPEN_POWER_N_BULK_POWER_LIMIT_WATTS</id>
+-		<default>1250</default>
++		<default>1200</default>
+ 	</attribute>
+ 	<attribute>
+ 		<id>OPEN_POWER_N_MAX_MEM_POWER_WATTS</id>
+-		<default>350</default>
++		<default>500</default>
+ 	</attribute>
+ 	<attribute>
+ 		<id>OPEN_POWER_N_PLUS_ONE_BULK_POWER_LIMIT_WATTS</id>
