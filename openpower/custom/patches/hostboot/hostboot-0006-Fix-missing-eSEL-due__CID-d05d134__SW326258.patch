@@ -1,7 +1,7 @@
-From d05d1349b25622ac454f60fb4032d249f8fc8b4a Mon Sep 17 00:00:00 2001
+From 6ca76478fac403c3f48c5b0c92ad829ad0bd60b8 Mon Sep 17 00:00:00 2001
 From: Jay Azurin <jmazurin@us.ibm.com>
 Date: Fri, 30 Oct 2015 14:50:31 -0500
-Subject: [PATCH] Fix missing eSEL due to 0 PEL size
+Subject: [PATCH 50/52] Fix missing eSEL due to 0 PEL size
 
 Instead of always setting the PEL size to zero for the first SEL, set the PEL
 size to zero only after a SEL is sent.
@@ -62,3 +62,6 @@ index 0020ee1..3668e20 100644
              } // for l_callouts
          }
          else
+-- 
+1.8.2.2
+
