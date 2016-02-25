@@ -1,0 +1,166 @@
+From 6e526f63e7600487cc6efd615354d4a3ed6b6f6b Mon Sep 17 00:00:00 2001
+From: Chris Cain <cjcain@us.ibm.com>
+Date: Mon, 15 Feb 2016 17:22:17 -0600
+Subject: [PATCH] Query BMC to determine if turbo frequency should be allowed
+
+Change-Id: I4d38b23271c29f776bc0351fa9f171d5ffc22fc8
+RTC: 146126
+Reviewed-on: http://gfw160.aus.stglabs.ibm.com:8080/gerrit/24371
+Tested-by: Jenkins Server
+Tested-by: Jenkins OP Build CI
+Tested-by: Jenkins OP HW
+Tested-by: FSP CI Jenkins
+Reviewed-by: Martha Broyles <mbroyles@us.ibm.com>
+Reviewed-by: SHELDON R. BAILEY <baileysh@us.ibm.com>
+Reviewed-by: Daniel M. Crowell <dcrowell@us.ibm.com>
+---
+ src/usr/htmgt/htmgt_cfgdata.C                      | 83 ++++++++++++++++++----
+ .../common/xmltohb/attribute_types_hb.xml          |  4 ++
+ 2 files changed, 73 insertions(+), 14 deletions(-)
+
+diff --git a/src/usr/htmgt/htmgt_cfgdata.C b/src/usr/htmgt/htmgt_cfgdata.C
+index 75d118b..584793c 100644
+--- a/src/usr/htmgt/htmgt_cfgdata.C
++++ b/src/usr/htmgt/htmgt_cfgdata.C
+@@ -5,7 +5,7 @@
+ /*                                                                        */
+ /* OpenPOWER HostBoot Project                                             */
+ /*                                                                        */
+-/* Contributors Listed Below - COPYRIGHT 2014,2015                        */
++/* Contributors Listed Below - COPYRIGHT 2014,2016                        */
+ /* [+] International Business Machines Corp.                              */
+ /*                                                                        */
+ /*                                                                        */
+@@ -744,6 +744,48 @@ void getThermalControlMessageData(uint8_t* o_data,
+ }
+ 
+ 
++// Determine if the BMC will allow turbo to be used.
++// Returns true if turbo is allowed, else false
++bool bmcAllowsTurbo(Target* i_sys)
++{
++    bool turboAllowed = true;
++
++    uint32_t sensorNum = UTIL::getSensorNumber(i_sys,
++                                               SENSOR_NAME_TURBO_ALLOWED);
++    // VALID IPMI sensors are 0-0xFE
++    if (sensorNum != 0xFF)
++    {
++        // Check if turbo frequency is allowed on BMC
++        SENSOR::getSensorReadingData turboSupportData;
++        SENSOR::SensorBase turboSensor(SENSOR_NAME_TURBO_ALLOWED, i_sys);
++        errlHndl_t err = turboSensor.readSensorData(turboSupportData);
++        if (NULL == err)
++        {
++            // 0x02 == Asserted bit (turbo frequency is allowed)
++            if ((turboSupportData.event_status & 0x02) == 0x02)
++            {
++                TMGT_INF("bmcAllowsTurbo: turbo is allowed");
++            }
++            else
++            {
++                turboAllowed = false;
++            }
++        }
++        else
++        {
++            // error reading sensor, assume turbo is allowed
++            TMGT_ERR("bmcAllowsTurbo: unable to read turbo support sensor "
++                     " from BMC, rc=0x%04X",
++                     err->reasonCode());
++            delete err;
++        }
++    }
++    // else, sensor not supported on this platform so turbo is allowed
++
++    return turboAllowed;
++}
++
++
+ void getFrequencyPointMessageData(uint8_t* o_data,
+                                   uint64_t & o_size)
+ {
+@@ -841,35 +883,47 @@ void getFrequencyPointMessageData(uint8_t* o_data,
+     memcpy(&o_data[index], &nominal, 2);
+     index += 2;
+ 
++    // Check if MRW allows turbo
+     uint8_t turboAllowed =
+         sys->getAttr<ATTR_OPEN_POWER_TURBO_MODE_SUPPORTED>();
+     if (turboAllowed)
+     {
+-        turbo = sys->getAttr<ATTR_FREQ_CORE_MAX>();
+-
+-        //Ultra Turbo Frequency in MHz
+-        const uint16_t wofSupported = sys->getAttr<ATTR_WOF_ENABLED>();
+-        if (0 != wofSupported)
++        // Check if BMC allows turbo
++        if (bmcAllowsTurbo(sys))
+         {
+-            ultra = sys->getAttr<ATTR_ULTRA_TURBO_FREQ_MHZ>();
+-            if (0 != ultra)
++            turbo = sys->getAttr<ATTR_FREQ_CORE_MAX>();
++
++            //Ultra Turbo Frequency in MHz
++            const uint16_t wofSupported = sys->getAttr<ATTR_WOF_ENABLED>();
++            if (0 != wofSupported)
+             {
+-                if (biasFactor)
++                ultra = sys->getAttr<ATTR_ULTRA_TURBO_FREQ_MHZ>();
++                if (0 != ultra)
++                {
++                    if (biasFactor)
++                    {
++                        TMGT_INF("Pre-biased Ultra=%dMhz", ultra);
++                        // % change = (biasFactor/2) / 100
++                        ultra += ((ultra * biasFactor) / 200);
++                    }
++                }
++                else
+                 {
+-                    TMGT_INF("Pre-biased Ultra=%dMhz", ultra);
+-                    // % change = (biasFactor/2) / 100
+-                    ultra += ((ultra * biasFactor) / 200);
++                    TMGT_INF("getFrequencyPoint: WOF enabled, but freq is 0");
++                    G_wofSupported = false;
+                 }
+             }
+             else
+             {
+-                TMGT_INF("getFrequencyPoint: WOF enabled, but freq is 0");
++                TMGT_INF("getFrequencyPoint: WOF not enabled");
+                 G_wofSupported = false;
+             }
+         }
+         else
+         {
+-            TMGT_INF("getFrequencyPoint: WOF not enabled");
++            TMGT_INF("getFrequencyPoint: Turbo/WOF not allowed by BMC");
++            TMGT_CONSOLE("Turbo frequency not allowed due to BMC limit");
++            turbo = nominal;
+             G_wofSupported = false;
+         }
+     }
+@@ -878,6 +932,7 @@ void getFrequencyPointMessageData(uint8_t* o_data,
+         // If turbo not supported, send nominal for turbo
+         // and 0 for ultra-turbo (no WOF support)
+         TMGT_INF("getFrequencyPoint: Turbo/WOF not supported");
++        TMGT_CONSOLE("Turbo frequency not supported");
+         turbo = nominal;
+         G_wofSupported = false;
+     }
+diff --git a/src/usr/targeting/common/xmltohb/attribute_types_hb.xml b/src/usr/targeting/common/xmltohb/attribute_types_hb.xml
+index 76bea55..f8b450b 100644
+--- a/src/usr/targeting/common/xmltohb/attribute_types_hb.xml
++++ b/src/usr/targeting/common/xmltohb/attribute_types_hb.xml
+@@ -1113,6 +1113,10 @@
+         <name>REDUNDANT_PS_POLICY</name>
+         <value>0xCA22</value>
+     </enumerator>
++    <enumerator>
++        <name>TURBO_ALLOWED</name>
++        <value>0xCB03</value>
++    </enumerator>
+ </enumerationType>
+ 
+ <enumerationType>
