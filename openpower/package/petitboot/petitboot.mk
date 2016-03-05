@@ -4,7 +4,10 @@
 #
 ################################################################################
 
-PETITBOOT_VERSION = 72928ed32ab3684be74e4a3b90329dee7cfa6bbb
+##P E TITBOOT_VERSION = 72928ed32ab3684be74e4a3b90329dee7cfa6bbb
+## pje - 03/05 - updated to the fix for fix version side being
+##               interpreted backwards
+PETITBOOT_VERSION = a6bb8cc856f43730ee04f2bae7d974551560a420
 PETITBOOT_SITE ?= $(call github,open-power,petitboot,$(PETITBOOT_VERSION))
 PETITBOOT_DEPENDENCIES = ncurses udev host-bison host-flex lvm2
 PETITBOOT_LICENSE = GPLv2
