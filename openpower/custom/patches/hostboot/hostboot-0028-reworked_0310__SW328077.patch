@@ -1,4 +1,4 @@
-From 45b384f0dbeadef732cb07b43511e41c5bb75f7c Mon Sep 17 00:00:00 2001
+From fdd5fa168f4dec8518f5e0e80dbeab6b2a54e258 Mon Sep 17 00:00:00 2001
 From: Matt Ploetz <maploetz@us.ibm.com>
 Date: Wed, 9 Mar 2016 16:23:20 -0600
 Subject: [PATCH] Ensure ipmiSel thread finishes before shutting down ipmidd
@@ -10,9 +10,9 @@ Forward-port:yes
  src/include/usr/ipmi/ipmiif.H                      |  4 ++-
  src/include/usr/ipmi/ipmisel.H                     |  9 +++----
  .../initservice/istepdispatcher/istepdispatcher.C  |  9 -------
- src/usr/ipmi/ipmirp.C                              | 31 +++++++++++++++++++---
- src/usr/ipmi/ipmisel.C                             | 26 ++++++++----------
- 5 files changed, 45 insertions(+), 34 deletions(-)
+ src/usr/ipmi/ipmirp.C                              | 30 +++++++++++++++++++---
+ src/usr/ipmi/ipmisel.C                             | 26 ++++++++-----------
+ 5 files changed, 45 insertions(+), 33 deletions(-)
 
 diff --git a/src/include/usr/ipmi/ipmiif.H b/src/include/usr/ipmi/ipmiif.H
 index fa13c32..a62f722 100644
@@ -106,7 +106,7 @@ index 8f94ae2..cac3d0b 100644
  
      // Create and commit error log for FFDC and call doShutdown with the RC
 diff --git a/src/usr/ipmi/ipmirp.C b/src/usr/ipmi/ipmirp.C
-index fb542bc..f2d74de 100644
+index fb542bc..a9c2f52 100644
 --- a/src/usr/ipmi/ipmirp.C
 +++ b/src/usr/ipmi/ipmirp.C
 @@ -5,7 +5,7 @@
@@ -126,7 +126,7 @@ index fb542bc..f2d74de 100644
  #include <devicefw/driverif.H>
  #include <devicefw/userif.H>
  
-@@ -630,13 +631,35 @@ void IpmiRP::execute(void)
+@@ -630,10 +631,33 @@ void IpmiRP::execute(void)
              // we wait for the reply from the BMC.
          case IPMI::MSG_STATE_SHUTDOWN:
              {
@@ -149,9 +149,8 @@ index fb542bc..f2d74de 100644
 +                }
 +                    
                  iv_shutdown_msg = msg;        // Reply to this message
--
-                 break;
-             }
++                break;
++            }
  
 +        case IPMI::MSG_STATE_SHUTDOWN_SEL:
 +            {
@@ -160,11 +159,9 @@ index fb542bc..f2d74de 100644
 +                IPMI_TRAC(INFO_MRK "MSG_SHUTDOWN_FROM_SEL: "
 +                    "ipmi begin shutdown");
 +                l_shutdown_pending = true;    // Stop incoming new messages
-+            }
-+
-         case IPMI::MSG_STATE_GRACEFUL_SHUTDOWN:
-             {
-                 IPMI_TRAC(INFO_MRK "MSG_STATE_GRACEFUL_SHUTDOWN: send power"
+                 break;
+             }
+ 
 diff --git a/src/usr/ipmi/ipmisel.C b/src/usr/ipmi/ipmisel.C
 index 9e687c3..372763f 100644
 --- a/src/usr/ipmi/ipmisel.C
