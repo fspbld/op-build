@@ -1,0 +1,236 @@
+From 45b384f0dbeadef732cb07b43511e41c5bb75f7c Mon Sep 17 00:00:00 2001
+From: Matt Ploetz <maploetz@us.ibm.com>
+Date: Wed, 9 Mar 2016 16:23:20 -0600
+Subject: [PATCH] Ensure ipmiSel thread finishes before shutting down ipmidd
+
+Change-Id: I07a5ea99e5e5c5672bf889689b25551b9c95b0ff
+CQ:SW328077
+Forward-port:yes
+---
+ src/include/usr/ipmi/ipmiif.H                      |  4 ++-
+ src/include/usr/ipmi/ipmisel.H                     |  9 +++----
+ .../initservice/istepdispatcher/istepdispatcher.C  |  9 -------
+ src/usr/ipmi/ipmirp.C                              | 31 +++++++++++++++++++---
+ src/usr/ipmi/ipmisel.C                             | 26 ++++++++----------
+ 5 files changed, 45 insertions(+), 34 deletions(-)
+
+diff --git a/src/include/usr/ipmi/ipmiif.H b/src/include/usr/ipmi/ipmiif.H
+index fa13c32..a62f722 100644
+--- a/src/include/usr/ipmi/ipmiif.H
++++ b/src/include/usr/ipmi/ipmiif.H
+@@ -5,7 +5,7 @@
+ /*                                                                        */
+ /* OpenPOWER HostBoot Project                                             */
+ /*                                                                        */
+-/* Contributors Listed Below - COPYRIGHT 2012,2015                        */
++/* Contributors Listed Below - COPYRIGHT 2012,2016                        */
+ /* [+] International Business Machines Corp.                              */
+ /*                                                                        */
+ /*                                                                        */
+@@ -50,6 +50,8 @@ namespace IPMI
+ 
+         MSG_STATE_SHUTDOWN,
+ 
++        MSG_STATE_SHUTDOWN_SEL,
++
+         MSG_STATE_GRACEFUL_SHUTDOWN,
+ 
+         // Used to check range. Leave as last.
+diff --git a/src/include/usr/ipmi/ipmisel.H b/src/include/usr/ipmi/ipmisel.H
+index 3ffa34e..4509130 100644
+--- a/src/include/usr/ipmi/ipmisel.H
++++ b/src/include/usr/ipmi/ipmisel.H
+@@ -34,7 +34,6 @@
+ #include <stdint.h>
+ #include <builtins.h>
+ #include <ipmi/ipmiif.H>
+-#include <sys/sync.h>
+ 
+ 
+ /**
+@@ -47,7 +46,8 @@ namespace IPMISEL
+     {
+         MSG_SEND_ESEL,
+         MSG_STATE_SHUTDOWN,
+-        MSG_LAST_TYPE = MSG_STATE_SHUTDOWN,
++        MSG_STATE_SHUTDOWN_SEL,
++        MSG_LAST_TYPE = MSG_STATE_SHUTDOWN_SEL,
+     };
+ 
+     typedef struct sel_info
+@@ -321,9 +321,9 @@ class IpmiSEL
+ 
+       /**
+        * Thread start routine for the resource provider
+-       * @param[in] void* instance - 'this' instance to start.
++       * @param[in] void*, unused
+        */
+-      static void* start(void* instance);
++      static void* start(void* unused);
+ 
+       /**
+        * Default constructor
+@@ -350,7 +350,6 @@ class IpmiSEL
+       void execute(void);
+ 
+       msg_q_t           iv_msgQ;      //!< ipmi message queue
+-      barrier_t         iv_sync_start;
+ 
+       //Disallow copying of this class.
+       IpmiSEL& operator=(const IpmiSEL&);
+diff --git a/src/usr/initservice/istepdispatcher/istepdispatcher.C b/src/usr/initservice/istepdispatcher/istepdispatcher.C
+index 8f94ae2..cac3d0b 100644
+--- a/src/usr/initservice/istepdispatcher/istepdispatcher.C
++++ b/src/usr/initservice/istepdispatcher/istepdispatcher.C
+@@ -70,10 +70,6 @@
+ #include <config.h>
+ #include <ipmi/ipmisensor.H>
+ 
+-#ifdef CONFIG_BMC_IPMI
+-#include <ipmi/ipmisel.H>
+-#endif
+-
+ #include <initservice/bootconfigif.H>
+ 
+ namespace ISTEPS_TRACE
+@@ -1308,11 +1304,6 @@ void IStepDispatcher::handleShutdownMsg(msg_t * & io_pMsg)
+ void IStepDispatcher::shutdownDuringIpl()
+ {
+ 
+-#ifdef CONFIG_BMC_IPMI
+-    /* Ensure the ipmiSEL thread is running and registered with doShutdown. */
+-    Singleton<IpmiSEL>::instance().msgQueue();
+-#endif
+-
+     TRACFCOMP(g_trac_initsvc, ENTER_MRK"IStepDispatcher::shutdownDuringIpl");
+ 
+     // Create and commit error log for FFDC and call doShutdown with the RC
+diff --git a/src/usr/ipmi/ipmirp.C b/src/usr/ipmi/ipmirp.C
+index fb542bc..f2d74de 100644
+--- a/src/usr/ipmi/ipmirp.C
++++ b/src/usr/ipmi/ipmirp.C
+@@ -5,7 +5,7 @@
+ /*                                                                        */
+ /* OpenPOWER HostBoot Project                                             */
+ /*                                                                        */
+-/* Contributors Listed Below - COPYRIGHT 2012,2015                        */
++/* Contributors Listed Below - COPYRIGHT 2012,2016                        */
+ /* [+] International Business Machines Corp.                              */
+ /*                                                                        */
+ /*                                                                        */
+@@ -32,6 +32,7 @@
+ #include "ipmidd.H"
+ #include <ipmi/ipmi_reasoncodes.H>
+ #include <ipmi/ipmiif.H>
++#include <ipmi/ipmisel.H>
+ #include <devicefw/driverif.H>
+ #include <devicefw/userif.H>
+ 
+@@ -630,13 +631,35 @@ void IpmiRP::execute(void)
+             // we wait for the reply from the BMC.
+         case IPMI::MSG_STATE_SHUTDOWN:
+             {
+-                IPMI_TRAC(INFO_MRK "MSG_STATE_SHUTDOWN: ipmi begin shutdown");
+-                l_shutdown_pending = true;    // Stop incoming new messages
++                // Poke the IPMI sel task to flush out any messages.
++                // This must be done before we shut down the device driver.
++                IPMI_TRAC(INFO_MRK "Sending shutdown to sel task");
++                Singleton<IpmiSEL>::instance();
++                msg_t *rmsg = msg_allocate();
++                rmsg->type = IPMISEL::MSG_STATE_SHUTDOWN_SEL;
++                msg_q_t mq = Singleton<IpmiSEL>::instance().msgQueue();
++
++                //Send the msg to the sel thread
++                int rc = msg_sendrecv_noblk(mq,rmsg,iv_msgQ);
++                if(rc)
++                {
++                    IPMI_TRAC(ERR_MRK "Failed (rc=%d) to send ipmiSEL flush "
++                        "message. We may have lost a sel.",rc);
++                }
++                    
+                 iv_shutdown_msg = msg;        // Reply to this message
+-
+                 break;
+             }
+ 
++        case IPMI::MSG_STATE_SHUTDOWN_SEL:
++            {
++                // The sel thread has responsed to us, so it must be flushed.
++                // We can now shutdown
++                IPMI_TRAC(INFO_MRK "MSG_SHUTDOWN_FROM_SEL: "
++                    "ipmi begin shutdown");
++                l_shutdown_pending = true;    // Stop incoming new messages
++            }
++
+         case IPMI::MSG_STATE_GRACEFUL_SHUTDOWN:
+             {
+                 IPMI_TRAC(INFO_MRK "MSG_STATE_GRACEFUL_SHUTDOWN: send power"
+diff --git a/src/usr/ipmi/ipmisel.C b/src/usr/ipmi/ipmisel.C
+index 9e687c3..372763f 100644
+--- a/src/usr/ipmi/ipmisel.C
++++ b/src/usr/ipmi/ipmisel.C
+@@ -33,6 +33,7 @@
+ #include "ipmiconfig.H"
+ #include <ipmi/ipmi_reasoncodes.H>
+ #include <ipmi/ipmisensor.H>
++#include <ipmi/ipmiif.H>
+ 
+ #include <sys/task.h>
+ #include <initservice/taskargs.H>
+@@ -477,9 +478,7 @@ IpmiSEL::IpmiSEL(void)
+     :iv_msgQ(msg_q_create())
+ {
+     IPMI_TRAC(ENTER_MRK "IpmiSEL ctor");
+-    barrier_init(&iv_sync_start, 2);
+     task_create(&IpmiSEL::start, this);
+-    barrier_wait(&iv_sync_start);
+ }
+ 
+ /**
+@@ -492,7 +491,7 @@ IpmiSEL::~IpmiSEL(void)
+ 
+ void* IpmiSEL::start(void* instance)
+ {
+-    static_cast<IpmiSEL*>(instance)->execute();
++    Singleton<IpmiSEL>::instance().execute();
+     return NULL;
+ }
+ 
+@@ -505,18 +504,6 @@ void IpmiSEL::execute(void)
+     //Mark as an independent daemon so if it crashes we terminate.
+     task_detach();
+ 
+-    // Register shutdown events with init service.
+-    //      Done at the "end" of shutdown processesing.
+-    //      This will flush out any IPMI messages which were sent as
+-    //      part of the shutdown processing. We chose MBOX priority
+-    //      as we don't want to accidentally get this message after
+-    //      interrupt processing has stopped in case we need intr to
+-    //      finish flushing the pipe.
+-    INITSERVICE::registerShutdownEvent(iv_msgQ, IPMISEL::MSG_STATE_SHUTDOWN,
+-                                       INITSERVICE::MBOX_PRIORITY);
+-
+-    barrier_wait(&iv_sync_start);
+-
+     while(true)
+     {
+         msg_t* msg = msg_wait(iv_msgQ);
+@@ -544,6 +531,15 @@ void IpmiSEL::execute(void)
+                 //Respond that we are done shutting down.
+                 msg_respond(iv_msgQ, msg);
+                 break;
++
++            case IPMISEL::MSG_STATE_SHUTDOWN_SEL:
++                IPMI_TRAC(INFO_MRK "ipmisel "
++                   "shutdown message from ipmirp");
++                 msg->type = IPMI::MSG_STATE_SHUTDOWN_SEL;
++                //Respond that we are done shutting down.
++                msg_respond(iv_msgQ, msg);
++                break;
++                
+         }
+     } // while(1)
+     IPMI_TRAC(EXIT_MRK "message loop");
+-- 
+1.8.2.2
+
