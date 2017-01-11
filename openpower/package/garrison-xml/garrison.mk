@@ -7,8 +7,8 @@
 ####G#A#RRISON_XML_VERSION ?= e1e8d687a2c60f9da28f5bebf06058bf538272f2
 # op820.10 - updated 1/4 AM
 #          - then again 1/4 PM to d82ee4 (per Hauptli)
-#
-GARRISON_XML_VERSION ?= d82ee4179a13219bd230f700a6cf0b200d213ecf
+#          - and again 1/11 to c4d238e (per Hauptli)
+GARRISON_XML_VERSION ?= c4d238ee2f893d2b52b88c36c993e2c497ee6443
 GARRISON_XML_SITE ?= $(call github,open-power,garrison-xml,$(GARRISON_XML_VERSION))
 
 GARRISON_XML_LICENSE = Apache-2.0
