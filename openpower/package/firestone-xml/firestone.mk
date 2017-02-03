@@ -4,7 +4,9 @@
 #
 ################################################################################
 
-FIRESTONE_XML_VERSION ?= 783df1f6efce8f0283ca6683825578d1a260cad3
+####F#I#R#ESTONE_XML_VERSION ?= 783df1f6efce8f0283ca6683825578d1a260cad3
+# 02/03 pje - update to commit for SW377484
+FIRESTONE_XML_VERSION ?= 2494a430656504d014780000adbc2c2e7cfc54ab
 FIRESTONE_XML_SITE ?= $(call github,open-power,firestone-xml,$(FIRESTONE_XML_VERSION))
 
 FIRESTONE_XML_LICENSE = Apache-2.0

@@ -4,7 +4,8 @@
 #
 ################################################################################
 
-PETITBOOT_VERSION = v1.3.1
+# 02/03 pje - go to v1.3.2
+PETITBOOT_VERSION = v1.3.2
 PETITBOOT_SITE ?= $(call github,open-power,petitboot,$(PETITBOOT_VERSION))
 PETITBOOT_DEPENDENCIES = ncurses udev host-bison host-flex lvm2
 PETITBOOT_LICENSE = GPLv2
