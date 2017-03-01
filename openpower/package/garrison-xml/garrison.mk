@@ -10,7 +10,9 @@
 #          - and again 1/11 to c4d238e (per Hauptli)
 ###G#A#RRISON_XML_VERSION ?= c4d238ee2f893d2b52b88c36c993e2c497ee6443
 # op820.10 - and again on 2/22 to 8ae5fb
-GARRISON_XML_VERSION ?= 8ae5fb811c2c0e6bdda3dbe542ea1e6eedaad4aa
+#G#A#RRISON_XML_VERSION ?= 8ae5fb811c2c0e6bdda3dbe542ea1e6eedaad4aa
+# 03/01 pje - back up one commit level to 847371f. The 8ae5 change broke us.
+GARRISON_XML_VERSION ?= 847371f2141e2d4320fa6700ee2dd9b97057831b
 GARRISON_XML_SITE ?= $(call github,open-power,garrison-xml,$(GARRISON_XML_VERSION))
 
 GARRISON_XML_LICENSE = Apache-2.0
