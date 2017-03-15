@@ -1,0 +1,100 @@
+From a4b7bb77b3c152af89a57f904f323228ad24373d Mon Sep 17 00:00:00 2001
+From: Dan Crowell <dcrowell@us.ibm.com>
+Date: Wed, 8 Mar 2017 14:13:53 -0600
+Subject: [PATCH] Report that sleep is not supported for Naples
+
+Modify the ibm,enabled-idle-states property to not include
+fast-sleep for Naples chips due to hardware error.
+
+Change-Id: I633b923e0aebf94d8cca2ce6f68883ebbc883ae5
+Reviewed-on: http://ralgit01.raleigh.ibm.com/gerrit1/37681
+Tested-by: Jenkins Server <pfd-jenkins+hostboot@us.ibm.com>
+Tested-by: FSP CI Jenkins <fsp-CI-jenkins+hostboot@us.ibm.com>
+Reviewed-by: Matthew A. Ploetz <maploetz@us.ibm.com>
+Reviewed-by: Daniel M. Crowell <dcrowell@us.ibm.com>
+---
+ src/usr/devtree/bld_devtree.C                  | 22 +++++++++++++++++-----
+ src/usr/hwpf/hwp/nest_chiplets/nest_chiplets.C | 20 ++++++++++++++------
+ 2 files changed, 31 insertions(+), 11 deletions(-)
+
+diff --git a/src/usr/devtree/bld_devtree.C b/src/usr/devtree/bld_devtree.C
+index 608e15f..7e020a2 100644
+--- a/src/usr/devtree/bld_devtree.C
++++ b/src/usr/devtree/bld_devtree.C
+@@ -1643,12 +1643,26 @@ errlHndl_t bld_fdt_system(devTree * i_dt, bool i_smallTree)
+ 
+     dtOffset_t rootNode = i_dt->findNode("/");
+ 
++    TARGETING::Target* sys = NULL;
++    TARGETING::targetService().getTopLevelTarget(sys);
++
+     //Common settings
+     /* Define supported power states -- options:
+                          nap, deep-sleep, fast-sleep, rvwinkle*/
+-    const char* pmode_compatStrs[] = {"nap", "fast-sleep", "rvwinkle", NULL};
+-    i_dt->addPropertyStrings(rootNode, "ibm,enabled-idle-states",
+-                             pmode_compatStrs);
++    uint8_t l_sleepEnable = sys->getAttr<TARGETING::ATTR_PM_SLEEP_ENABLE>();
++    if( l_sleepEnable )
++    {
++        const char* pmode_compatStrs[] = { "nap", "fast-sleep",
++                                           "rvwinkle", NULL };
++        i_dt->addPropertyStrings(rootNode, "ibm,enabled-idle-states",
++                                 pmode_compatStrs);
++    }
++    else
++    {
++        const char* pmode_compatStrs[] = { "nap", "rvwinkle", NULL };
++        i_dt->addPropertyStrings(rootNode, "ibm,enabled-idle-states",
++                                 pmode_compatStrs);
++    }
+ 
+     // Nothing to do for small trees currently.
+     if (!i_smallTree)
+@@ -1659,8 +1673,6 @@ errlHndl_t bld_fdt_system(devTree * i_dt, bool i_smallTree)
+         //===== compatible =====
+         /* Fetch the MRW-defined compatible model from attributes */
+         ATTR_OPAL_MODEL_type l_model = {0};
+-        TARGETING::Target* sys = NULL;
+-        TARGETING::targetService().getTopLevelTarget(sys);
+         sys->tryGetAttr<TARGETING::ATTR_OPAL_MODEL>(l_model);
+ 
+         /* Add compatibility value */
+diff --git a/src/usr/hwpf/hwp/nest_chiplets/nest_chiplets.C b/src/usr/hwpf/hwp/nest_chiplets/nest_chiplets.C
+index c69c50a..d122ae4 100644
+--- a/src/usr/hwpf/hwp/nest_chiplets/nest_chiplets.C
++++ b/src/usr/hwpf/hwp/nest_chiplets/nest_chiplets.C
+@@ -5,7 +5,7 @@
+ /*                                                                        */
+ /* OpenPOWER HostBoot Project                                             */
+ /*                                                                        */
+-/* Contributors Listed Below - COPYRIGHT 2012,2015                        */
++/* Contributors Listed Below - COPYRIGHT 2012,2017                        */
+ /* [+] International Business Machines Corp.                              */
+ /*                                                                        */
+ /*                                                                        */
+@@ -677,11 +677,19 @@ void*    call_proc_chiplet_scominit( void    *io_pArgs )
+         // initfile can be run correctly
+         if(is_sapphire_load())
+         {
+-            TARGETING::Target* l_sys = NULL;
+-            TARGETING::targetService().getTopLevelTarget(l_sys);
+-            assert( l_sys != NULL );
+-            uint8_t l_sleepEnable = 1;
+-            l_sys->setAttr<TARGETING::ATTR_PM_SLEEP_ENABLE>(l_sleepEnable);
++            // Naples is treating sleep as nap
++            TARGETING::Target* l_masterProc = NULL;
++            TARGETING::targetService()
++              .masterProcChipTargetHandle(l_masterProc);
++            if( l_masterProc->getAttr<TARGETING::ATTR_MODEL>()
++                != TARGETING::MODEL_NAPLES )
++            {
++                TARGETING::Target* l_sys = NULL;
++                TARGETING::targetService().getTopLevelTarget(l_sys);
++                assert( l_sys != NULL );
++                uint8_t l_sleepEnable = 1;
++                l_sys->setAttr<TARGETING::ATTR_PM_SLEEP_ENABLE>(l_sleepEnable);
++            }
+         }
+ 
+         // ----------------------------------------------
