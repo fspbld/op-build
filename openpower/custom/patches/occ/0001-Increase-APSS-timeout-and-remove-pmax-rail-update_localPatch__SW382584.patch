@@ -1,0 +1,160 @@
+From 6f6580a3d85c723ad517ae8cde98ce0bb28ed7ee Mon Sep 17 00:00:00 2001
+From: Chris Cain <cjcain@us.ibm.com>
+Date: Mon, 6 Mar 2017 15:25:13 -0600
+Subject: [PATCH 1/2] Increase APSS timeout and remove pmax rail update
+
+Change-Id: I1795f06077908ae639a35f8d6f09ea92f1cbb5fc
+CQ: SW382584
+Reviewed-on: http://ralgit01.raleigh.ibm.com/gerrit1/37560
+Reviewed-by: Martha Broyles <mbroyles@us.ibm.com>
+Tested-by: FSP CI Jenkins <fsp-CI-jenkins+hostboot@us.ibm.com>
+Reviewed-by: William A. Bryan <wilbryan@us.ibm.com>
+
+Conflicts:
+	src/occ/pss/apss.h
+---
+ src/occ/dcom/dcomSlaveRx.c | 69 ++++++----------------------------------------
+ src/occ/pss/apss.h         | 10 +++----
+ 2 files changed, 14 insertions(+), 65 deletions(-)
+
+diff --git a/src/occ/dcom/dcomSlaveRx.c b/src/occ/dcom/dcomSlaveRx.c
+index 792f73d..19348e5 100644
+--- a/src/occ/dcom/dcomSlaveRx.c
++++ b/src/occ/dcom/dcomSlaveRx.c
+@@ -461,7 +461,7 @@ void task_dcom_wait_for_master( task_t *i_self)
+     static bool         L_queue_enabled         = FALSE;
+     static uint32_t     L_pobid_retries_left    = POBID_RETRIES;
+     static uint16_t     L_no_master_doorbell_cnt = 0;
+-    static bool         L_log_first_fail        = FALSE;
++    static uint16_t     L_trace_every_count = 1;
+ 
+     DCOM_DBG("0. Wait for Master\n");
+ 
+@@ -487,67 +487,16 @@ void task_dcom_wait_for_master( task_t *i_self)
+                 // counter
+                 L_no_master_doorbell_cnt++;
+ 
+-                if (L_no_master_doorbell_cnt >= APSS_DATA_FAIL_PMAX_RAIL)
++
++                if (L_no_master_doorbell_cnt % L_trace_every_count == 0)
+                 {
+-                    // If we fail to receive the Master doorbell for this long, take
+-                    // action
+                     TRAC_INFO("task_dcom_wait_for_master: experiencing data collection problems! fail_count=%i",
+                               L_no_master_doorbell_cnt);
++                }
+ 
+-                    // Inform AMEC that Pmax_rail needs to change
+-                    G_apss_lower_pmax_rail = TRUE;
+-
+-                    if (!L_log_first_fail)
+-                    {
+-                        // Create and commit this error only once.
+-                        L_log_first_fail = TRUE;
+-                        TRAC_ERR("Detected a problem with slave data collection: soft time-out[%d]. Lowering Pmax_rail!",
+-                                 APSS_DATA_FAIL_PMAX_RAIL);
+-
+-                        /* @
+-                         * @errortype
+-                         * @moduleid    DCOM_MID_TASK_WAIT_FOR_MASTER
+-                         * @reasoncode  APSS_SLV_SHORT_TIMEOUT
+-                         * @userdata1   Time-out value
+-                         * @userdata4   OCC_NO_EXTENDED_RC
+-                         * @devdesc     Detected a problem with APSS data collection (short time-out)
+-                         */
+-                        errlHndl_t  l_errl = createErrl(
+-                                    DCOM_MID_TASK_WAIT_FOR_MASTER,  //modId
+-                                    APSS_SLV_SHORT_TIMEOUT,         //reasoncode
+-                                    OCC_NO_EXTENDED_RC,             //Extended reason code
+-                                    ERRL_SEV_INFORMATIONAL,         //Severity
+-                                    NULL,                           //Trace Buf
+-                                    DEFAULT_TRACE_SIZE,             //Trace Size
+-                                    APSS_DATA_FAIL_PMAX_RAIL,       //userdata1
+-                                    0                               //userdata2
+-                                    );
+-
+-                        // the manufacturing action flag must be set prior
+-                        // to calling the addCalloutToErrl in order to
+-                        // enable setting the callouts for informational SRCs
+-                        setErrlActions(l_errl, ERRL_ACTIONS_MANUFACTURING_ERROR);
+-
+-                        // Callout to firmware
+-                        addCalloutToErrl(l_errl,
+-                                         ERRL_CALLOUT_TYPE_COMPONENT_ID,
+-                                         ERRL_COMPONENT_ID_FIRMWARE,
+-                                         ERRL_CALLOUT_PRIORITY_MED);
+-
+-                        // Callout to processor
+-                        addCalloutToErrl(l_errl,
+-                                         ERRL_CALLOUT_TYPE_HUID,
+-                                         G_sysConfigData.proc_huid,
+-                                         ERRL_CALLOUT_PRIORITY_LOW);
+-
+-                        // Callout to APSS
+-                        addCalloutToErrl(l_errl,
+-                                         ERRL_CALLOUT_TYPE_HUID,
+-                                         G_sysConfigData.apss_huid,
+-                                         ERRL_CALLOUT_PRIORITY_LOW);
+-
+-                        commitErrl(&l_errl);
+-                    }
++                if (L_no_master_doorbell_cnt == APSS_DATA_FAIL_PMAX_RAIL)
++                {
++                    L_trace_every_count = 50;
+                 }
+ 
+                 if (L_no_master_doorbell_cnt == APSS_DATA_FAIL_MAX)
+@@ -699,12 +648,12 @@ void task_dcom_wait_for_master( task_t *i_self)
+         }
+         else
+         {
+-             TRAC_INFO("[%d] Restablished contact via doorbell from Master",(int) G_pob_id.chip_id);
++             TRAC_INFO("[%d] Restablished contact via doorbell from Master (after %d ticks)",(int) G_pob_id.chip_id, L_no_master_doorbell_cnt);
+ 
+              // Inform AMEC that Pmax_rail doesn't need to be lowered and reset
+              // the no_master_doorbell counter
+-             G_apss_lower_pmax_rail = FALSE;
+              L_no_master_doorbell_cnt = 0;
++             L_trace_every_count = 1;
+         }
+ 
+         // Got a multicast doorbell
+diff --git a/src/occ/pss/apss.h b/src/occ/pss/apss.h
+index 8de0cf2..c17e8f1 100644
+--- a/src/occ/pss/apss.h
++++ b/src/occ/pss/apss.h
+@@ -44,7 +44,7 @@ void dumpHexString(const void *i_data, const unsigned int len, const char *strin
+ #endif
+ 
+ #define APSS_DATA_FAIL_PMAX_RAIL  16  //Number of steps before we lower Pmax_rail to nominal. This should allow for 4ms/16ticks with no APSS data.
+-#define APSS_DATA_FAIL_MAX       400  //Number of steps we reach before reseting OCC.  This should allow for 100ms/400ticks with no APSS data.
++#define APSS_DATA_FAIL_MAX       800  //Number of steps we reach before reseting OCC.  This should allow for 200ms/800ticks with no APSS data.
+ #define APSS_DATA_FAILURE_STEP     1  //Number of steps to increment FAIL_COUNT due to a failed APSS data collection.
+ #define APSS_ERRORLOG_RESET_THRESHOLD 16 //When to allow apss tasks to log another error if count goes back to 0 again.
+ 
+@@ -93,18 +93,18 @@ typedef struct {
+   apssCompositeConfigStruct_t config; // G_apss_composite_config (input to APSS)
+ } setCompositeModeArgs_t;
+ 
+-typedef struct 
++typedef struct
+ {
+-  PoreGpeErrorStruct error;   
++  PoreGpeErrorStruct error;
+ } apss_start_args_t;
+ 
+ typedef struct {
+-  PoreGpeErrorStruct error;   
++  PoreGpeErrorStruct error;
+   uint64_t meas_data[4]; // G_apss_pwr_meas (1st block of data) (output from APSS)
+ } apss_continue_args_t;
+ 
+ typedef struct {
+-  PoreGpeErrorStruct error;   
++  PoreGpeErrorStruct error;
+   uint64_t meas_data[4]; // G_apss_pwr_meas (2nd block of data) (output from APSS)
+ } apss_complete_args_t;
+ 
+-- 
+1.8.2.2
+

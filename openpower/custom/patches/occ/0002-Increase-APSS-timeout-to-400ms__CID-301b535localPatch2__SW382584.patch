@@ -1,7 +1,7 @@
-From 48f8e3c9707ef1f0279116492282a251e63d0a5e Mon Sep 17 00:00:00 2001
+From 57d6d64c6ab02d985dafb7b2de11097e3591f4fc Mon Sep 17 00:00:00 2001
 From: Chris Cain <cjcain@us.ibm.com>
 Date: Wed, 8 Mar 2017 15:56:15 -0600
-Subject: [PATCH] Increase APSS timeout to 400ms
+Subject: [PATCH 2/2] Increase APSS timeout to 400ms
 
 Change-Id: I83db88cb1ef97cfb0d6cb7cf7c561c2f346e923f
 Reviewed-on: http://ralgit01.raleigh.ibm.com/gerrit1/37756
@@ -14,9 +14,9 @@ Conflicts:
 	src/occ/occbuildname.c
 	src/occ/pss/apss.h
 ---
- src/occ/occbuildname.c |  2 +-
- src/occ/pss/apss.h     | 10 +++++-----
- 2 files changed, 6 insertions(+), 6 deletions(-)
+ src/occ/occbuildname.c | 2 +-
+ src/occ/pss/apss.h     | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
 
 diff --git a/src/occ/occbuildname.c b/src/occ/occbuildname.c
 index 8921bc7..c0907b9 100755
@@ -31,40 +31,17 @@ index 8921bc7..c0907b9 100755
  
  #endif
 diff --git a/src/occ/pss/apss.h b/src/occ/pss/apss.h
-index 8de0cf2..2ad7ce5 100644
+index c17e8f1..2ad7ce5 100644
 --- a/src/occ/pss/apss.h
 +++ b/src/occ/pss/apss.h
 @@ -44,7 +44,7 @@ void dumpHexString(const void *i_data, const unsigned int len, const char *strin
  #endif
  
  #define APSS_DATA_FAIL_PMAX_RAIL  16  //Number of steps before we lower Pmax_rail to nominal. This should allow for 4ms/16ticks with no APSS data.
--#define APSS_DATA_FAIL_MAX       400  //Number of steps we reach before reseting OCC.  This should allow for 100ms/400ticks with no APSS data.
+-#define APSS_DATA_FAIL_MAX       800  //Number of steps we reach before reseting OCC.  This should allow for 200ms/800ticks with no APSS data.
 +#define APSS_DATA_FAIL_MAX      1600  //Number of steps we reach before reseting OCC.  This should allow for 400ms/1600ticks with no APSS data.
  #define APSS_DATA_FAILURE_STEP     1  //Number of steps to increment FAIL_COUNT due to a failed APSS data collection.
  #define APSS_ERRORLOG_RESET_THRESHOLD 16 //When to allow apss tasks to log another error if count goes back to 0 again.
- 
-@@ -93,18 +93,18 @@ typedef struct {
-   apssCompositeConfigStruct_t config; // G_apss_composite_config (input to APSS)
- } setCompositeModeArgs_t;
- 
--typedef struct 
-+typedef struct
- {
--  PoreGpeErrorStruct error;   
-+  PoreGpeErrorStruct error;
- } apss_start_args_t;
- 
- typedef struct {
--  PoreGpeErrorStruct error;   
-+  PoreGpeErrorStruct error;
-   uint64_t meas_data[4]; // G_apss_pwr_meas (1st block of data) (output from APSS)
- } apss_continue_args_t;
- 
- typedef struct {
--  PoreGpeErrorStruct error;   
-+  PoreGpeErrorStruct error;
-   uint64_t meas_data[4]; // G_apss_pwr_meas (2nd block of data) (output from APSS)
- } apss_complete_args_t;
  
 -- 
 1.8.2.2
