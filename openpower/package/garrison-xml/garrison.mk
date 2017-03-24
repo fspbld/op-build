@@ -14,8 +14,9 @@
 # 03/01 pje - back up one commit level to 847371f. The 8ae5 change broke us.
 #
 # 03/07 pje - up a couple levels to fix sw381304 (to 3cd6e7e)
+# 03/24 pje - back out sw363867, pick up SW384269 in 19a5164
 #
-GARRISON_XML_VERSION ?= 3cd6e7ea9287a8c96f9ba710c67baff92e97af2c
+GARRISON_XML_VERSION ?= 19a516499e1090c20c5a3303db256529ef22c1c9
 GARRISON_XML_SITE ?= $(call github,open-power,garrison-xml,$(GARRISON_XML_VERSION))
 
 GARRISON_XML_LICENSE = Apache-2.0
