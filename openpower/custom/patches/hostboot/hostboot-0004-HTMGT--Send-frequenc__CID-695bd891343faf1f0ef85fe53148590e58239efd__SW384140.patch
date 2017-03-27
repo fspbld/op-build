@@ -1,0 +1,42 @@
+From 695bd891343faf1f0ef85fe53148590e58239efd Mon Sep 17 00:00:00 2001
+From: Chris Cain <cjcain@us.ibm.com>
+Date: Thu, 23 Mar 2017 11:52:41 -0500
+Subject: [PATCH] HTMGT: Send frequency packet to OCC prior to pstate
+
+Change-Id: I1dfd1f689270e8511112b8fa251da5d3b3c57dff
+CQ: SW384140
+Reviewed-on: http://ralgit01.raleigh.ibm.com/gerrit1/38373
+Reviewed-by: William A. Bryan <wilbryan@us.ibm.com>
+Tested-by: Jenkins Server <pfd-jenkins+hostboot@us.ibm.com>
+Reviewed-by: Martha Broyles <mbroyles@us.ibm.com>
+Tested-by: Jenkins OP Build CI <op-jenkins+hostboot@us.ibm.com>
+Tested-by: Jenkins OP HW <op-hw-jenkins+hostboot@us.ibm.com>
+Tested-by: FSP CI Jenkins <fsp-CI-jenkins+hostboot@us.ibm.com>
+Reviewed-by: Matthew A. Ploetz <maploetz@us.ibm.com>
+---
+ src/usr/htmgt/htmgt_cfgdata.H | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/usr/htmgt/htmgt_cfgdata.H b/src/usr/htmgt/htmgt_cfgdata.H
+index f5290ba..8ae22df 100644
+--- a/src/usr/htmgt/htmgt_cfgdata.H
++++ b/src/usr/htmgt/htmgt_cfgdata.H
+@@ -5,7 +5,7 @@
+ /*                                                                        */
+ /* OpenPOWER HostBoot Project                                             */
+ /*                                                                        */
+-/* Contributors Listed Below - COPYRIGHT 2014,2015                        */
++/* Contributors Listed Below - COPYRIGHT 2014,2017                        */
+ /* [+] International Business Machines Corp.                              */
+ /*                                                                        */
+ /*                                                                        */
+@@ -102,8 +102,8 @@ namespace HTMGT
+         { OCC_CFGDATA_SYS_CONFIG,     TARGET_ALL,    TO_20SEC, CFGSTATE_ALL },
+         { OCC_CFGDATA_APSS_CONFIG,    TARGET_ALL,    TO_20SEC, CFGSTATE_ALL },
+         { OCC_CFGDATA_OCC_ROLE,       TARGET_ALL,  TO_20SEC,CFGSTATE_STANDBY },
+-        { OCC_CFGDATA_PSTATE_SSTRUCT, TARGET_ALL,  TO_20SEC, CFGSTATE_SBYOBS },
+         { OCC_CFGDATA_FREQ_POINT,    TARGET_MASTER,TO_20SEC, CFGSTATE_SBYOBS },
++        { OCC_CFGDATA_PSTATE_SSTRUCT, TARGET_ALL,  TO_20SEC, CFGSTATE_SBYOBS },
+         { OCC_CFGDATA_MEM_CONFIG,     TARGET_ALL,    TO_20SEC, CFGSTATE_ALL },
+         { OCC_CFGDATA_PCAP_CONFIG,    TARGET_MASTER, TO_20SEC, CFGSTATE_ALL },
+         { OCC_CFGDATA_MEM_THROTTLE,   TARGET_ALL,    TO_20SEC, CFGSTATE_ALL },
