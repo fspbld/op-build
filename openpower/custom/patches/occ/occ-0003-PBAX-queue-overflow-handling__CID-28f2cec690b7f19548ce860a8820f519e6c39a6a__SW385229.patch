@@ -1,0 +1,1044 @@
+From 28f2cec690b7f19548ce860a8820f519e6c39a6a Mon Sep 17 00:00:00 2001
+From: mbroyles <mbroyles@us.ibm.com>
+Date: Tue, 18 Apr 2017 15:10:22 -0500
+Subject: [PATCH] PBAX queue overflow handling
+
+Change-Id: Id65bb1c0cf886dbb3f58a42ef906c9b869a8978b
+CQ: SW385229
+Reviewed-on: http://ralgit01.raleigh.ibm.com/gerrit1/39385
+Tested-by: FSP CI Jenkins <fsp-CI-jenkins+hostboot@us.ibm.com>
+Reviewed-by: William A. Bryan <wilbryan@us.ibm.com>
+Reviewed-by: Christopher J. Cain <cjcain@us.ibm.com>
+Reviewed-by: Martha Broyles <mbroyles@us.ibm.com>
+---
+ src/occ/cmdh/cmdh_snapshot.c      |   8 -
+ src/occ/dcom/dcom.c               | 127 ++++++++++++++-
+ src/occ/dcom/dcom.h               |   3 +
+ src/occ/dcom/dcomMasterRx.c       | 329 ++++++++++++++++++++------------------
+ src/occ/dcom/dcomMasterTx.c       |  53 ++++--
+ src/occ/dcom/dcomSlaveRx.c        |  80 +++++++--
+ src/occ/dcom/dcomSlaveTx.c        |  17 +-
+ src/occ/dcom/dcom_service_codes.h |   2 +
+ src/occ/occ_service_codes.h       |   4 +
+ src/occ/occbuildname.c            |   2 +-
+ src/occ/proc/proc_data.c          |   4 +-
+ src/occ/pss/apss.c                |  21 +--
+ 12 files changed, 425 insertions(+), 225 deletions(-)
+
+diff --git a/src/occ/cmdh/cmdh_snapshot.c b/src/occ/cmdh/cmdh_snapshot.c
+index fb81098..6752220 100755
+--- a/src/occ/cmdh/cmdh_snapshot.c
++++ b/src/occ/cmdh/cmdh_snapshot.c
+@@ -74,7 +74,6 @@ VOID cmdh_snapshot_find_oldest_newest(uint8_t  *o_oldest,
+            (g_cmdh_snapshot_array[0].current_id == 0) &&
+            (g_cmdh_snapshot_array[CMDH_SNAPSHOT_MAX_INDEX].current_id == 0))
+         {
+-            TRAC_INFO("cmdh_snapshot_find_oldest_newest: Entry 0 is the oldest and newest");
+             *o_oldest = 0;
+             *o_newest = 0;
+             break;
+@@ -141,7 +140,6 @@ ERRL_RC cmdh_snapshot_buffer_nonite(const cmdh_fsp_cmd_t *i_cmd_ptr,
+         // Check case where there are no snapshot buffers available.
+         if (g_cmdh_snapshot_cur_index == CMDH_SNAPSHOT_DEFAULT_CUR_INDEX)
+         {
+-            TRAC_INFO("cmdh_snapshot_buffer_nonite: No snapshot buffer available.");
+             break;
+         }
+ 
+@@ -170,8 +168,6 @@ ERRL_RC cmdh_snapshot_buffer_nonite(const cmdh_fsp_cmd_t *i_cmd_ptr,
+ 
+             if (i == CMDH_SNAPSHOT_MAX)
+             {
+-                TRAC_INFO("cmdh_snapshot_buffer_nonite: Requested buffer:%u not found so sending back %u",
+-                          l_cmd_ptr->requested_id, l_rsp_ptr->newest_id);
+                 l_req_idx = l_newest;
+             }
+         }
+@@ -319,8 +315,6 @@ errlHndl_t cmdh_snapshot_sync(const cmdh_fsp_cmd_t * i_cmd_ptr,
+             break;
+         }
+ 
+-        TRAC_INFO("cmdh_snapshot_sync: Snapshot buffer has been reset!");
+-
+         l_resp_ptr->data_length[0] = 0;
+         l_resp_ptr->data_length[1] = 0;
+         l_resp_ptr->rc = 0;
+@@ -370,8 +364,6 @@ void cmdh_snapshot_callback(void * arg)
+ 
+     if (g_cmdh_snapshot_reset)
+     {
+-        TRAC_INFO("cmdh_snapshot_callback: Initializing snapshot buffer and data.");
+-
+         memset(g_cmdh_snapshot_array, 0, sizeof(g_cmdh_snapshot_array));
+         g_cmdh_snapshot_cur_id  = 0;
+         memset(L_cim_buf,0,sizeof(cmdh_snapshot_buffer_t));
+diff --git a/src/occ/dcom/dcom.c b/src/occ/dcom/dcom.c
+index 6febedd..deed892 100755
+--- a/src/occ/dcom/dcom.c
++++ b/src/occ/dcom/dcom.c
+@@ -379,7 +379,7 @@ void dcom_initialize_pbax_queues(void)
+                 break;
+             }
+ 
+-            // create pbax rx queue o
++            // create pbax rx queue 0
+             l_rc = pbax_queue_create( &G_pbax_read_queue[0],//queue
+                     ASYNC_ENGINE_PBAX_PUSH0,                //engine
+                     G_pbax_queue_rx0_buffer,                //cq base
+@@ -810,5 +810,130 @@ void task_dcom_parse_occfwmsg(task_t *i_self)
+     G_slave_event_flags = (G_slave_event_flags & (~(G_dcom_slv_inbox_rx.occ_fw_mailbox[3])));
+ }
+ 
++// Function Specification
++//
++// Name: dcom_pbax_error_handler
++//
++// Description: Handle an error from a pbax_read call
++//
++// End Function Specification
++void dcom_pbax_error_handler(const uint8_t i_queue)
++{
++    uint64_t     l_pba_errpt2 = 0;
++    uint64_t     l_pba_fir = 0;
++    pba_xshcsn_t l_pba_shcs;
++    pba_xcfg_t   l_pbax_cfg;
++
++    SsxAddress   l_pba_shcs_addr = PBA_XSHCS0;
++    int          l_pba_errpt_scom_rc = 0;
++    int          l_pba_fir_scom_rc = 0;
++    errlHndl_t   l_err = NULL;
++    static bool  L_pba_reset_logged[2] = {FALSE};
++
++    // Skip if waiting for a reset, no sense in trying to recover when going to be reset anyway
++    if((TRUE == isSafeStateRequested()) || (CURRENT_STATE() == OCC_STATE_SAFE))
++       return;
++
++    if(i_queue == 1)
++       l_pba_shcs_addr = PBA_XSHCS1;
++
++    l_pba_shcs.words.high_order = in32(l_pba_shcs_addr);
++
++    TRAC_ERR("dcom_pbax_error_handler: Start error handler for queue %d PBA_XSHCS[0x%08x]",
++              i_queue,
++              l_pba_shcs.words.high_order);
++
++    do
++    {
++       l_pba_fir_scom_rc = _getscom(PBA_FIR, &l_pba_fir, SCOM_TIMEOUT);
++       if(l_pba_fir_scom_rc)
++       {
++          // trace scom failure and skip clearing pba fir
++          TRAC_ERR("dcom_pbax_error_handler: Failure reading PBA_FIR rc[%08x]",
++                    l_pba_fir_scom_rc);
++       }
++
++       l_pba_errpt_scom_rc = _getscom(PBA_ERRPT2, &l_pba_errpt2, SCOM_TIMEOUT);
++       if(l_pba_errpt_scom_rc)
++       {
++          // trace scom failure
++          TRAC_ERR("dcom_pbax_error_handler: Failure reading PBA_ERRPT2 rc[%08x]",
++                    l_pba_errpt_scom_rc);
++       }
++
++       TRAC_ERR("dcom_pbax_error_handler: PBA_FIR[0x%08x%08x] PBA_ERRPT2[0x%08x%08x]",
++                 (uint32_t)(l_pba_fir >> 32),
++                 (uint32_t)(l_pba_fir & 0x00000000ffffffffull),
++                 (uint32_t)(l_pba_errpt2 >> 32),
++                 (uint32_t)(l_pba_errpt2 & 0x00000000ffffffffull));
++
++       // reset queue and clear the error condition to allow future pbax reads
++
++       // 1. Disable the pushQ and reset the read & write pointer by writing 0 to push_enable (bit 31)
++       l_pba_shcs.fields.push_enable = 0;
++       out32(l_pba_shcs_addr, l_pba_shcs.words.high_order);
++
++       // 2. Clear the error status by setting rcv_reset (bit 3) in the PBAX CFG register
++       l_pbax_cfg.value = in64(PBA_XCFG);
++       l_pbax_cfg.fields.rcv_reset = 1;
++       out64(PBA_XCFG, l_pbax_cfg.value);
++
++
++       // 3.  Clear bits 32 and 35 in PBAFIR and zero out PBAERRPT2
++       // only clear PBAFIR if it was successfully read
++       if(!l_pba_fir_scom_rc)
++       {
++          l_pba_fir &= (~0x0000000090000000);
++          l_pba_fir_scom_rc = _putscom(PBA_FIR, l_pba_fir, SCOM_TIMEOUT);
++          if(l_pba_fir_scom_rc)
++          {
++             TRAC_ERR("dcom_pbax_error_handler: Failure writing 0x%08x%08x to PBA_FIR rc[%08x]",
++                       (uint32_t)(l_pba_fir >> 32),
++                       (uint32_t)(l_pba_fir & 0x00000000ffffffffull),
++                       l_pba_fir_scom_rc);
++          }
++
++       }
++
++       // to clear error report 2 write to error report 0
++       l_pba_errpt_scom_rc = _putscom(PBA_ERRPT0, 0, SCOM_TIMEOUT);
++       if(l_pba_errpt_scom_rc)
++       {
++          TRAC_ERR("dcom_pbax_error_handler: Failure writing 0 to PBA_ERRPT0 rc[%08x]",
++                    l_pba_errpt_scom_rc);
++       }
++
++       // 4.  Reenable the pushQ (set push_enable bit 31)
++       l_pba_shcs.fields.push_enable = 1;
++       out32(l_pba_shcs_addr, l_pba_shcs.words.high_order);
++
++       TRAC_INFO("dcom_pbax_error_handler: Success resetting queue %d PBA_XSHCS[0x%08x] PBA_XCFG[0x%08x]",
++                  i_queue, in32(l_pba_shcs_addr), in32(PBA_XCFG));
++
++       if(L_pba_reset_logged[i_queue] == FALSE)
++       {
++          // log error to indicate queue was reset
++          /* @
++           * @errortype
++           * @moduleid    DCOM_MID_PBAX_ERROR_HANDLER
++           * @reasoncode  PBAX_QUEUE_RESET
++           * @userdata1   PBA queue
++           * @userdata4   OCC_NO_EXTENDED_RC
++           * @devdesc     PBAX queue reset
++           */
++           l_err = createErrl( DCOM_MID_PBAX_ERROR_HANDLER,    //modId
++                               PBAX_QUEUE_RESET,               //reasoncode
++                               OCC_NO_EXTENDED_RC,             //Extended reason code
++                               ERRL_SEV_INFORMATIONAL,         //Severity
++                               NULL,                           //Trace Buf
++                               DEFAULT_TRACE_SIZE,             //Trace Size
++                               i_queue,                        //userdata1
++                               0);                             //userdata2
++           commitErrl(&l_err);
++           L_pba_reset_logged[i_queue] = TRUE;
++       }
++    }while(0);
++}
++
+ #endif //_DCOM_C
+ 
+diff --git a/src/occ/dcom/dcom.h b/src/occ/dcom/dcom.h
+index 3c1dfa5..44747ce 100755
+--- a/src/occ/dcom/dcom.h
++++ b/src/occ/dcom/dcom.h
+@@ -519,4 +519,7 @@ void dcom_build_occfw_msg( dcom_error_type_t i_which_msg );
+ // Copy OCC DCM Sync Messages
+ void dcom_build_dcm_sync_msg(const dcom_error_type_t i_which_msg);
+ 
++// Handle PBAX Error
++void dcom_pbax_error_handler(const uint8_t i_queue);
++
+ #endif //_DCOM_H
+diff --git a/src/occ/dcom/dcomMasterRx.c b/src/occ/dcom/dcomMasterRx.c
+index 752f744..6b09821 100644
+--- a/src/occ/dcom/dcomMasterRx.c
++++ b/src/occ/dcom/dcomMasterRx.c
+@@ -45,7 +45,7 @@ BceRequest G_slv_outbox_rx_pba_request[MAX_OCCS];
+ // Used by the master to house the doorbell data that is received from
+ // the slave unicast doorbells from each slave, stating that it put its slave
+ // outbox in main memory.
+-dcom_slv_outbox_doorbell_t G_dcom_slv_outbox_doorbell_rx[MAX_OCCS];
++dcom_slv_outbox_doorbell_t G_dcom_slv_outbox_doorbell_rx[NUM_ENTRIES_PBAX_QUEUE1];
+ 
+ // Make sure that the Slave Outbox RX Buffer is 1kB / OCC, otherwise cause
+ // error on the compile.
+@@ -84,6 +84,9 @@ void task_dcom_rx_slv_outboxes( task_t *i_self)
+     uint32_t        l_orc = OCC_SUCCESS_REASON_CODE;
+     uint32_t        l_orc_ext = OCC_NO_EXTENDED_RC;
+     uint8_t         l_slv_response_mask = 0;
++    uint8_t         l_slv = 0;
++    uint32_t        l_num_doorbells_rxd = 0;
++
+     // Use a static local bool to track whether the BCE request used
+     // here has ever been successfully created at least once
+     static bool     L_bce_slv_outbox_rx_request_created_once[MAX_OCCS] = {FALSE,};
+@@ -93,7 +96,7 @@ void task_dcom_rx_slv_outboxes( task_t *i_self)
+     do
+     {
+         // Doorbell from the slave
+-        uint32_t l_num_doorbells_rxd = dcom_rx_slv_outbox_doorbell();
++        l_num_doorbells_rxd = dcom_rx_slv_outbox_doorbell();
+ 
+         // How many doorbells were received?
+         if( l_num_doorbells_rxd < G_occ_num_present )
+@@ -117,83 +120,93 @@ void task_dcom_rx_slv_outboxes( task_t *i_self)
+             L_wait4slaves++;
+         }
+ 
++        // if we got more than 1 doorbell from a slave only use the newest for that slave
++        // Do this first and then make BCE schedule requests
++
+         uint32_t l_slv_idx = 0;
++        uint32_t l_slv_main_mem_addr[MAX_OCCS] = {0};
+ 
+         // Loop through all doorbells received
+         for(; l_slv_idx < l_num_doorbells_rxd; l_slv_idx++)
+         {
+             // Index/occ id
+-            uint8_t l_slv = 0;
++            l_slv = 0;
+ 
+             // Main memory address
+             uint32_t l_addr = dcom_calc_slv_outbox_addr( &G_dcom_slv_outbox_doorbell_rx[l_slv_idx], &l_slv);
+-
++            l_slv_main_mem_addr[l_slv] = l_addr;
+             G_slave_active_pcaps[l_slv].active_pcap = G_dcom_slv_outbox_doorbell_rx[l_slv_idx].active_node_pcap;
+             G_slave_active_pcaps[l_slv].pcap_valid = G_dcom_slv_outbox_doorbell_rx[l_slv_idx].pcap_valid;
+ 
+             // Add slave to mask of responding slaves
+             l_slv_response_mask |= (0x01 << l_slv);
++        }
+ 
+-            // Check valid address (should be inside inbox addresses range)
+-            if ( (ADDR_SLAVE_OUTBOX_MAIN_MEM_PING <= l_addr) &&
+-                 ((ADDR_SLAVE_OUTBOX_MAIN_MEM_PONG+(sizeof(dcom_slv_outbox_t)*MAX_OCCS)) > l_addr) )
+-            {
+-                DCOM_DBG("2.X. Copy down Slave Outboxes from %x\n",l_addr);
+-                uint32_t l_ssxrc = 0;
+-
+-                // Using a global bce request requires some special consideration
+-                // of the possible request states.  Note that since this task
+-                // runs in the critical section of the RTL tick that external
+-                // non-critical interrupts are disabled.  This includes the PIT
+-                // interrupt from the OCB timer used to generate the interrupt
+-                // that runs the RTL tick code which led us here.  The point is
+-                // that this code cannot be re-entrant which implies that if a
+-                // request is created without error then it will also be
+-                // scheduled before this task runs again.  In the good path we
+-                // can never get here and have a BCE request that was not yet
+-                // scheduled.
+-                // There are four possible request states:
+-                // 1. request is idle and complete: The request was created
+-                // and scheduled and has completed without error.
+-                // 2. request is idle and not complete: The request was created
+-                // and scheduled but was either canceled, killed or has errored
+-                // out, or there was an error scheduling the request.
+-                // 3. request is not idle and not complete: The request was
+-                // created and scheduled but is still in progress or still
+-                // enqueued.  Note that there is a special case here where this
+-                // could also mean that this is the first time we are running
+-                // this task so the global request is uninitialized.  It could
+-                // also mean there was an error creating the request (unlikely)
+-                // so it was never scheduled.
+-                // 4. request is not idle and complete:  This can't happen.
+-                //
+-                bool l_proceed_with_request_and_schedule = FALSE;
+-                int l_req_idle = async_request_is_idle(&(G_slv_outbox_rx_pba_request[l_slv].request));
+-                int l_req_complete = async_request_completed(&(G_slv_outbox_rx_pba_request[l_slv].request));
+-
+-                if (!L_bce_slv_outbox_rx_request_created_once[l_slv])
+-                {
+-                    // Do this case first, all other cases assume that this is
+-                    // true!
+-                    // This is the first time we have created a request so
+-                    // always proceed with request create and schedule
+-                    l_proceed_with_request_and_schedule = TRUE;
+-                }
+-                else if (l_req_idle && l_req_complete)
+-                {
+-                    // Most likely case first.  The request was created
+-                    // and scheduled and has completed without error.  Proceed.
+-                    // Proceed with request create and schedule.
+-                    l_proceed_with_request_and_schedule = TRUE;
+-                }
+-                else if (l_req_idle && !l_req_complete)
+-                {
+-                    // There was an error on the schedule request or the request
+-                    // was scheduled but was canceled, killed or errored out.
+-                    // Proceed with request create and schedule.
+-                    l_proceed_with_request_and_schedule = TRUE;
+-                    // Trace important information from the request
+-                    TRAC_INFO("BCE slv outbox rx request idle but not complete, \
++        // Loop thru all slaves to copy down outbox from main memory
++        for(l_slv = 0; l_slv < MAX_OCCS; l_slv++)
++        {
++           if(l_slv_main_mem_addr[l_slv])
++           {
++              // Check valid address (should be inside inbox addresses range)
++              if ( (ADDR_SLAVE_OUTBOX_MAIN_MEM_PING <= l_slv_main_mem_addr[l_slv]) &&
++                 ((ADDR_SLAVE_OUTBOX_MAIN_MEM_PONG+(sizeof(dcom_slv_outbox_t)*MAX_OCCS)) >
++                      l_slv_main_mem_addr[l_slv]) )
++              {
++                  DCOM_DBG("2.X. Copy down Slave Outboxes from %x\n",l_slv_main_mem_addr[l_slv]);
++                  uint32_t l_ssxrc = 0;
++
++                  // Using a global bce request requires some special consideration
++                  // of the possible request states.  Note that since this task
++                  // runs in the critical section of the RTL tick that external
++                  // non-critical interrupts are disabled.  This includes the PIT
++                  // interrupt from the OCB timer used to generate the interrupt
++                  // that runs the RTL tick code which led us here.  The point is
++                  // that this code cannot be re-entrant which implies that if a
++                  // request is created without error then it will also be
++                  // scheduled before this task runs again.  In the good path we
++                  // can never get here and have a BCE request that was not yet
++                  // scheduled.
++                  // There are four possible request states:
++                  // 1. request is idle and complete: The request was created
++                  // and scheduled and has completed without error.
++                  // 2. request is idle and not complete: The request was created
++                  // and scheduled but was either canceled, killed or has errored
++                  // out, or there was an error scheduling the request.
++                  // 3. request is not idle and not complete: The request was
++                  // created and scheduled but is still in progress or still
++                  // enqueued.  Note that there is a special case here where this
++                  // could also mean that this is the first time we are running
++                  // this task so the global request is uninitialized.  It could
++                  // also mean there was an error creating the request (unlikely)
++                  // so it was never scheduled.
++                  // 4. request is not idle and complete:  This can't happen.
++
++                  bool l_proceed_with_request_and_schedule = FALSE;
++                  int l_req_idle = async_request_is_idle(&(G_slv_outbox_rx_pba_request[l_slv].request));
++                  int l_req_complete = async_request_completed(&(G_slv_outbox_rx_pba_request[l_slv].request));
++
++                  if (!L_bce_slv_outbox_rx_request_created_once[l_slv])
++                  {
++                      // Do this case first, all other cases assume that this is true!
++                      // This is the first time we have created a request so
++                      // always proceed with request create and schedule
++                      l_proceed_with_request_and_schedule = TRUE;
++                  }
++                  else if (l_req_idle && l_req_complete)
++                  {
++                      // Most likely case first.  The request was created
++                      // and scheduled and has completed without error.  Proceed.
++                      // Proceed with request create and schedule.
++                      l_proceed_with_request_and_schedule = TRUE;
++                  }
++                  else if (l_req_idle && !l_req_complete)
++                  {
++                      // There was an error on the schedule request or the request
++                      // was scheduled but was canceled, killed or errored out.
++                      // Proceed with request create and schedule.
++                      l_proceed_with_request_and_schedule = TRUE;
++                      // Trace important information from the request
++                      TRAC_INFO("BCE slv outbox rx request idle but not complete, \
+                               callback_rc=%d options=0x%x state=0x%x abort_state=0x%x \
+                               completion_state=0x%x",
+                               G_slv_outbox_rx_pba_request[l_slv].request.callback_rc,
+@@ -201,45 +214,45 @@ void task_dcom_rx_slv_outboxes( task_t *i_self)
+                               G_slv_outbox_rx_pba_request[l_slv].request.state,
+                               G_slv_outbox_rx_pba_request[l_slv].request.abort_state,
+                               G_slv_outbox_rx_pba_request[l_slv].request.completion_state);
+-                    TRAC_INFO("Proceeding with BCE slv outbox rx request and schedule");
+-                }
+-                else if (!l_req_idle && !l_req_complete)
+-                {
+-                    // The request was created and scheduled but is still in
+-                    // progress or still enqueued OR there was some error
+-                    // creating the request so it was never scheduled.  The latter
+-                    // case is unlikely and will generate an error message when
+-                    // it occurs.  It will also have to happen after the request
+-                    // was created at least once or we'll never get here.  If the
+-                    // request does fail though before the state parms in the
+-                    // request are reset (like a bad parameter error), then this
+-                    // represents a hang condition that we can't recover from.
+-                    // DO NOT proceed with request create and schedule.
+-                    l_proceed_with_request_and_schedule = FALSE;
+-                    // Trace important information from the request
+-                    TRAC_INFO("BCE slv outbox rx request not idle and not complete, callback_rc[%d] options[0x%x] state[0x%x] abort_state[0x%x] completion_state[0x%x]",
++                      TRAC_INFO("Proceeding with BCE slv outbox rx request and schedule");
++                  }
++                  else if (!l_req_idle && !l_req_complete)
++                  {
++                      // The request was created and scheduled but is still in
++                      // progress or still enqueued OR there was some error
++                      // creating the request so it was never scheduled.  The latter
++                      // case is unlikely and will generate an error message when
++                      // it occurs.  It will also have to happen after the request
++                      // was created at least once or we'll never get here.  If the
++                      // request does fail though before the state parms in the
++                      // request are reset (like a bad parameter error), then this
++                      // represents a hang condition that we can't recover from.
++                      // DO NOT proceed with request create and schedule.
++                      l_proceed_with_request_and_schedule = FALSE;
++                      // Trace important information from the request
++                      TRAC_INFO("BCE slv outbox rx request not idle and not complete, callback_rc[%d] options[0x%x] state[0x%x] abort_state[0x%x] completion_state[0x%x]",
+                               G_slv_outbox_rx_pba_request[l_slv].request.callback_rc,
+                               G_slv_outbox_rx_pba_request[l_slv].request.options,
+                               G_slv_outbox_rx_pba_request[l_slv].request.state,
+                               G_slv_outbox_rx_pba_request[l_slv].request.abort_state,
+                               G_slv_outbox_rx_pba_request[l_slv].request.completion_state);
+ 
+-                    TRAC_INFO("NOT proceeding with BCE slv outbox rx request and schedule for slave[0x%02X]",
++                      TRAC_INFO("NOT proceeding with BCE slv outbox rx request and schedule for slave[0x%02X]",
+                               l_slv);
+-                }
+-                else
+-                {
+-                    // This is not a possible state.
+-                }
+-
+-                // Only proceed if the BCE request state checked out
+-                if (l_proceed_with_request_and_schedule)
+-                {
+-                    // Copy request from main memory to SRAM
+-                    l_ssxrc = bce_request_create(
++                  }
++                  else
++                  {
++                      // This is not a possible state.
++                  }
++
++                  // Only proceed if the BCE request state checked out
++                  if (l_proceed_with_request_and_schedule)
++                  {
++                      // Copy request from main memory to SRAM
++                      l_ssxrc = bce_request_create(
+                                     &G_slv_outbox_rx_pba_request[l_slv],             // block copy object
+                                     &G_pba_bcde_queue,                               // mainstore to sram copy engine
+-                                    l_addr,                                          // mainstore address
++                                    l_slv_main_mem_addr[l_slv],                      // mainstore address
+                                     (uint32_t)&G_dcom_slv_outbox_rx[l_slv],          // sram starting address
+                                     sizeof(dcom_slv_outbox_t),                       // size of copy
+                                     SSX_WAIT_FOREVER,                                // no timeout
+@@ -247,60 +260,60 @@ void task_dcom_rx_slv_outboxes( task_t *i_self)
+                                     (void *)&l_slv,                                  // call back arguments
+                                     ASYNC_CALLBACK_IMMEDIATE                         // blocking request
+                                     );
+-                    if(l_ssxrc != SSX_OK)
+-                    {
+-                        /* @
+-                         * @errortype
+-                         * @moduleid    DCOM_MID_TASK_RX_SLV_OUTBOX
+-                         * @reasoncode  SSX_GENERIC_FAILURE
+-                         * @userdata1   N/A
+-                         * @userdata4   ERC_BCE_REQUEST_CREATE_FAILURE
+-                         * @devdesc     SSX BCE related failure
+-                         */
+-                        TRAC_ERR("PBA request create failure rc=[%08X]",l_ssxrc);
+-                        l_orc = SSX_GENERIC_FAILURE;
+-                        l_orc_ext = ERC_BCE_REQUEST_CREATE_FAILURE;
+-                        break;
+-                    }
+-
+-                    // Request created at least once
+-                    L_bce_slv_outbox_rx_request_created_once[l_slv] = TRUE;
+-                    l_ssxrc = bce_request_schedule(&G_slv_outbox_rx_pba_request[l_slv]); // Actual copying
+-
+-                    if(l_ssxrc != SSX_OK)
+-                    {
+-                        /* @
+-                         * @errortype
+-                         * @moduleid    DCOM_MID_TASK_RX_SLV_OUTBOX
+-                         * @reasoncode  SSX_GENERIC_FAILURE
+-                         * @userdata1   N/A
+-                         * @userdata4   ERC_BCE_REQUEST_SCHEDULE_FAILURE
+-                         * @devdesc     SSX BCE related failure
+-                         */
+-                        TRAC_ERR("PBA request schedule failure rc=[%08X]",l_ssxrc);
+-                        l_orc = SSX_GENERIC_FAILURE;
+-                        l_orc_ext = ERC_BCE_REQUEST_SCHEDULE_FAILURE;
+-                        break;
+-                    }
+-                }
+-            }
+-            else
+-            {
+-                /* @
+-                 * @errortype
+-                 * @moduleid    DCOM_MID_TASK_RX_SLV_OUTBOX
+-                 * @reasoncode  INTERNAL_INVALID_INPUT_DATA
+-                 * @userdata1   N/A
+-                 * @userdata4   OCC_NO_EXTENDED_RC
+-                 * @devdesc     Memory related failure
+-                 */
+-                TRAC_ERR("Invalid address from calculate slave inbox address function [%08X]", l_addr );
+-                l_orc = INTERNAL_INVALID_INPUT_DATA;
+-                l_orc_ext = OCC_NO_EXTENDED_RC;
+-                break;
+-            }
+-        }
+-
++                      if(l_ssxrc != SSX_OK)
++                      {
++                          /* @
++                           * @errortype
++                           * @moduleid    DCOM_MID_TASK_RX_SLV_OUTBOX
++                           * @reasoncode  SSX_GENERIC_FAILURE
++                           * @userdata1   N/A
++                           * @userdata4   ERC_BCE_REQUEST_CREATE_FAILURE
++                           * @devdesc     SSX BCE related failure
++                           */
++                          TRAC_ERR("PBA request create failure rc=[%08X]",l_ssxrc);
++                          l_orc = SSX_GENERIC_FAILURE;
++                          l_orc_ext = ERC_BCE_REQUEST_CREATE_FAILURE;
++                          break;
++                      }
++
++                     // Request created at least once
++                     L_bce_slv_outbox_rx_request_created_once[l_slv] = TRUE;
++                     l_ssxrc = bce_request_schedule(&G_slv_outbox_rx_pba_request[l_slv]); // Actual copying
++
++                     if(l_ssxrc != SSX_OK)
++                     {
++                         /* @
++                          * @errortype
++                          * @moduleid    DCOM_MID_TASK_RX_SLV_OUTBOX
++                          * @reasoncode  SSX_GENERIC_FAILURE
++                          * @userdata1   N/A
++                          * @userdata4   ERC_BCE_REQUEST_SCHEDULE_FAILURE
++                          * @devdesc     SSX BCE related failure
++                          */
++                         TRAC_ERR("PBA request schedule failure rc=[%08X]",l_ssxrc);
++                         l_orc = SSX_GENERIC_FAILURE;
++                         l_orc_ext = ERC_BCE_REQUEST_SCHEDULE_FAILURE;
++                         break;
++                     }
++                 }
++              }
++              else
++              {
++                  /* @
++                   * @errortype
++                   * @moduleid    DCOM_MID_TASK_RX_SLV_OUTBOX
++                   * @reasoncode  INTERNAL_INVALID_INPUT_DATA
++                   * @userdata1   N/A
++                   * @userdata4   OCC_NO_EXTENDED_RC
++                   * @devdesc     Memory related failure
++                   */
++                  TRAC_ERR("Invalid address from calculate slave inbox address function [%08X]", l_slv_main_mem_addr[l_slv]);
++                  l_orc = INTERNAL_INVALID_INPUT_DATA;
++                  l_orc_ext = OCC_NO_EXTENDED_RC;
++                  break;
++              }
++           }  //if l_slv_main_mem_addr (slave is present)
++        }  // for l_slv copy outbox from main memory
+         L_wait4slaves = 0;
+     }
+     while( 0 );
+@@ -353,31 +366,27 @@ void task_dcom_rx_slv_outboxes( task_t *i_self)
+ // End Function Specification
+ uint32_t dcom_rx_slv_outbox_doorbell( void )
+ {
+-    static bool l_error = FALSE;
+     int         l_pbarc = 0;
+     uint32_t    l_read = 0;
+ 
+-    // Grab doorbells from slave
++    // Grab doorbells from slave, read out the whole queue to prevent overflow
+     l_pbarc = pbax_read(
+             &G_pbax_read_queue[1],
+             &G_dcom_slv_outbox_doorbell_rx[0],
+-            sizeof(dcom_slv_outbox_doorbell_t)*MAX_OCCS,
++            sizeof(dcom_slv_outbox_doorbell_t)*NUM_ENTRIES_PBAX_QUEUE1,
+             &l_read
+             );
+ 
+-    if ( l_pbarc != 0 && l_error == FALSE )
++    if (l_pbarc != 0)
+     {
+-        // Failure occurred but only trace it once
+-        TRAC_ERR("PBAX Read Failure in receiving unicast doorbell - RC[%08X]", l_pbarc);
++        // Failure occurred
++        TRAC_ERR("Master PBAX Read Failure in receiving slave doorbells - RC[%08X]", l_pbarc);
+ 
+-        l_error  = TRUE;
+-    }
+-    else
+-    {
+-        l_error  = FALSE;
++        // Handle pbax read failure on queue 1
++        dcom_pbax_error_handler(1);
+     }
+ 
+-    // Return the number of doorbells read by dividing the bytes read by the number of occs slaves
++    // Return the number of doorbells read by dividing the bytes read by the doorbell size
+     return (l_read/sizeof(dcom_slv_outbox_doorbell_t));
+ }
+ 
+diff --git a/src/occ/dcom/dcomMasterTx.c b/src/occ/dcom/dcomMasterTx.c
+index 7d13000..71b5280 100644
+--- a/src/occ/dcom/dcomMasterTx.c
++++ b/src/occ/dcom/dcomMasterTx.c
+@@ -71,12 +71,14 @@ uint16_t G_apss_fail_updown_count = 0x0000;
+ uint32_t dcom_build_slv_inbox(void)
+ {
+     // Locals
+-    uint32_t l_addr_of_slv_inbox_in_main_mem = 0;
+-    uint32_t l_slv_idx = 0;
+-    uint32_t l_core_idx = 0;
+-    uint32_t l_cntr_idx = 0;
+-    uint32_t l_mem_intr_idx = 0;
+-
++    uint32_t            l_addr_of_slv_inbox_in_main_mem = 0;
++    uint32_t            l_slv_idx = 0;
++    uint32_t            l_core_idx = 0;
++    uint32_t            l_cntr_idx = 0;
++    uint32_t            l_mem_intr_idx = 0;
++    errlHndl_t          l_err = NULL;
++    static uint16_t     L_master_pbax_send_fail_count = 0;
++    static bool         L_error_logged = FALSE;
+     static uint8_t      L_seq = 0xFF;
+ 
+     L_seq++;
+@@ -85,8 +87,38 @@ uint32_t dcom_build_slv_inbox(void)
+     // interrupt context.
+     if(G_pbax_rc)
+     {
+-        TRAC_INFO("PBAX Send Failure in transimitting multicast doorbell - RC[%08X], packet[%d]", G_pbax_rc, G_pbax_packet);
++        L_master_pbax_send_fail_count++;
++        TRAC_ERR("PBAX Send Failure in transimitting multicast doorbell - RC[%08X], packet[%d] Num fails %d",
++                  G_pbax_rc, G_pbax_packet, L_master_pbax_send_fail_count);
++
++        // There is nothing we can do if we cannot get the doorbell across (hw retry threshold of 0xFF was found
++        // to not be enough for heavy workloads running at frequency close to nest) log an error here so it is
++        // known that lack of power data is due to pbax send failures.  An OCC reset does not clear this condition
++        // so no reason to reset the OCC here.
++        if ((L_master_pbax_send_fail_count == APSS_DATA_FAIL_PMAX_RAIL) && (!L_error_logged))
++        {
++          /* @
++           * @errortype
++           * @moduleid    DCOM_MID_BUILD_SLV_INBOX
++           * @reasoncode  PBAX_ERROR
++           * @userdata1   Number of consecutive pbax send failures
++           * @userdata4   OCC_NO_EXTENDED_RC
++           * @devdesc     PBAX send failure sending data to slaves
++           */
++           l_err = createErrl( DCOM_MID_BUILD_SLV_INBOX,       //modId
++                               PBAX_ERROR,                     //reasoncode
++                               OCC_NO_EXTENDED_RC,             //Extended reason code
++                               ERRL_SEV_INFORMATIONAL,         //Severity
++                               NULL,                           //Trace Buf
++                               DEFAULT_TRACE_SIZE,             //Trace Size
++                               L_master_pbax_send_fail_count,  //userdata1
++                               0);                             //userdata2
++           commitErrl(&l_err);
++           L_error_logged = TRUE;
++        }
+     }
++    else
++       L_master_pbax_send_fail_count = 0;
+ 
+ 
+     // INBOX...............
+@@ -371,7 +403,6 @@ void task_dcom_tx_slv_inbox( task_t *i_self)
+                     l_ssx_failure = TRUE;
+                     break;
+                 }
+-
+                 // Request created at least once
+                 L_bce_slv_inbox_tx_request_created_once = TRUE;
+                 l_ssxrc = bce_request_schedule(&G_slv_inbox_tx_pba_request); // Actual copying
+@@ -400,8 +431,6 @@ void task_dcom_tx_slv_inbox( task_t *i_self)
+         else
+         {
+             // check time and break out if we reached limit
+-            // TODO: shrink this later depending on how much
+-            // work we are doing in RTL
+             if ((ssx_timebase_get() - l_start) < SSX_MICROSECONDS(150))
+             {
+                 continue;
+@@ -524,7 +553,8 @@ void dcom_tx_slv_inbox_doorbell( void )
+ 
+         // Set this global so we know to trace this in the non-critical interrupt context
+         G_pbax_rc = l_pbarc;
+-        if ( (l_pbarc != 0 ) )
++
++        if (l_pbarc != 0)
+         {
+             G_pbax_packet = l_jj;
+             // Trace causes a panic in a critical interrupt! Don't trace here!(tries to pend a semaphore)
+@@ -543,7 +573,6 @@ void dcom_tx_slv_inbox_doorbell( void )
+     G_dcomTime.master.doorbellSeq = G_dcom_slv_inbox_doorbell_tx.magic_counter;
+     G_dcomTime.master.doorbellNumSent++;
+ 
+-    DCOM_DBG("Sent multicast doorbell\n");
+ }
+ #endif //_DCOMMASTERTOSLAVE_C
+ 
+diff --git a/src/occ/dcom/dcomSlaveRx.c b/src/occ/dcom/dcomSlaveRx.c
+index 19348e5..fcd4078 100644
+--- a/src/occ/dcom/dcomSlaveRx.c
++++ b/src/occ/dcom/dcomSlaveRx.c
+@@ -333,11 +333,17 @@ void task_dcom_rx_slv_inbox( task_t *i_self)
+ // End Function Specification
+ uint32_t dcom_rx_slv_inbox_doorbell( void )
+ {
+-    static bool l_trace_once       = FALSE;
+-    int         l_pbarc            = 0;
+-    uint32_t    l_read             = 0;
+-    uint32_t    l_bytes_so_far     = 0;
+-    uint64_t    l_start            = ssx_timebase_get();
++    int           l_pbarc            = 0;
++    uint32_t      l_read             = 0;
++    uint32_t      l_bytes_so_far     = 0;
++    uint64_t      l_start            = ssx_timebase_get();
++    pba_xshcsn_t  l_pba_shcs0;
++    uint8_t       l_num_queue_entires = 0;
++    uint8_t       l_write_ptr = 0;
++    uint8_t       l_read_ptr = 0;
++    uint8_t       l_queue_full = 0;
++    bool          l_read_2_doorbells = FALSE;
++
+ 
+     G_dcomTime.slave.doorbellStartRx = l_start;
+ 
+@@ -357,18 +363,18 @@ uint32_t dcom_rx_slv_inbox_doorbell( void )
+         if ( l_pbarc != 0 )
+         {
+             G_dcomTime.slave.doorbellErrorFlags.hwError = 1;
+-            if ( FALSE == l_trace_once )
+-            {
+-                // Failure occurred but only trace it once
+-                TRAC_ERR("PBAX Read Failure in receiving multicast doorbell - RC[%08X]", l_pbarc);
+-                l_trace_once  = TRUE;
+-            }
++            // Failure occurred
++            TRAC_ERR("Slave PBAX Read Failure in receiving doorbell from master - RC[%08X]", l_pbarc);
++
++            // Handle pbax read failure on queue 0
++            dcom_pbax_error_handler(0);
+             break;
+         }
+ 
+         // Didn't read any bytes from pbax.  We are either done, or we
+         // simply don't have any data to read
+-        if(0 == l_read){
++        if(0 == l_read)
++        {
+             if ((ssx_timebase_get() - l_start) > SSX_MICROSECONDS(3))
+             {
+                 if(l_bytes_so_far){
+@@ -425,7 +431,51 @@ uint32_t dcom_rx_slv_inbox_doorbell( void )
+                }
+                G_dcomTime.slave.doorbellSeq = G_dcom_slv_inbox_doorbell_rx.magic_counter;
+            }
+-           break;
++
++           // if there is another full doorbell on the queue read that out to empty the queue
++           // and use that data as it is newer
++           l_pba_shcs0.value = in64(PBA_XSHCS0);
++           l_queue_full = l_pba_shcs0.fields.push_full;
++           l_write_ptr = (uint8_t)(l_pba_shcs0.fields.push_write_ptr);
++           l_read_ptr = (uint8_t)(l_pba_shcs0.fields.push_read_ptr);
++
++           // pointer is for an 8 byte queue entry, doorbell size is 128B == 16 queue entries
++           // when pointers equal each other that can be either empty or full so we need to
++           // check the full bit to handle that case
++           if(l_read_ptr > l_write_ptr)
++           {
++              l_num_queue_entires = NUM_ENTRIES_PBAX_QUEUE0 - (l_read_ptr - l_write_ptr);
++           }
++           else
++           {
++              l_num_queue_entires = l_write_ptr - l_read_ptr;
++           } 
++           if(l_queue_full || (l_num_queue_entires >= 16))
++           {
++              TRAC_IMP("dcom_rx_slv_inbox_doorbell: 2 doorbells PBA_XSHCS0[0x%08x]: full = %d 8B entries = %d read = %d write = %d",
++                        l_pba_shcs0.words.high_order,
++                        l_queue_full,
++                        l_num_queue_entires,
++                        l_read_ptr,
++                        l_write_ptr);
++              if(l_read_2_doorbells)
++              {
++                 // this shoud never happen but not going to read a 3rd to prevent infinite loop
++                 // we will either drain on next tick or overflow and recover from overflow
++                 TRAC_ERR("dcom_rx_slv_inbox_doorbell:  3rd full doorbell present!!! PBA_XSHCS0[0x%08x]",
++                          l_pba_shcs0.words.high_order);
++                 break;
++              }
++              // set up to start reading the 2nd doorbell
++              l_read_2_doorbells = TRUE;
++              l_read = 0;
++              l_bytes_so_far = 0;
++              l_start = ssx_timebase_get();
++           }
++           else
++           {
++             break;
++           }
+         }
+     }
+ 
+@@ -487,7 +537,6 @@ void task_dcom_wait_for_master( task_t *i_self)
+                 // counter
+                 L_no_master_doorbell_cnt++;
+ 
+-
+                 if (L_no_master_doorbell_cnt % L_trace_every_count == 0)
+                 {
+                     TRAC_INFO("task_dcom_wait_for_master: experiencing data collection problems! fail_count=%i",
+@@ -650,8 +699,7 @@ void task_dcom_wait_for_master( task_t *i_self)
+         {
+              TRAC_INFO("[%d] Restablished contact via doorbell from Master (after %d ticks)",(int) G_pob_id.chip_id, L_no_master_doorbell_cnt);
+ 
+-             // Inform AMEC that Pmax_rail doesn't need to be lowered and reset
+-             // the no_master_doorbell counter
++             // reset the no_master_doorbell counter
+              L_no_master_doorbell_cnt = 0;
+              L_trace_every_count = 1;
+         }
+diff --git a/src/occ/dcom/dcomSlaveTx.c b/src/occ/dcom/dcomSlaveTx.c
+index f01461e..3383509 100755
+--- a/src/occ/dcom/dcomSlaveTx.c
++++ b/src/occ/dcom/dcomSlaveTx.c
+@@ -50,6 +50,7 @@ dcom_slv_outbox_doorbell_t G_dcom_slv_outbox_doorbell_tx;
+ // Make sure that the Slave Outbox TX Buffer is 1kB, otherwise cause
+ // error on the compile.
+ STATIC_ASSERT(  (NUM_BYTES_IN_SLAVE_OUTBOX != (sizeof(G_dcom_slv_outbox_tx)))  );
++uint32_t G_slave_pbax_rc = 0;
+ 
+ // Function Specification
+ //
+@@ -160,6 +161,13 @@ void task_dcom_tx_slv_outbox( task_t *i_self)
+ 
+     do
+     {
++        // If there was a pbax_send failure, trace it here since we can't do it in the critical
++        // interrupt context.
++        if(G_slave_pbax_rc)
++        {
++           TRAC_ERR("task_dcom_tx_slv_outbox: PBAX Send Failure in transimitting doorbell - RC[%08X]", G_slave_pbax_rc);
++        }
++
+         // Build/setup outbox
+         uint32_t l_addr_in_mem = dcom_build_slv_outbox();
+         uint32_t l_ssxrc = 0;
+@@ -327,7 +335,6 @@ void task_dcom_tx_slv_outbox( task_t *i_self)
+ // End Function Specification
+ void dcom_tx_slv_outbox_doorbell( void )
+ {
+-    static bool l_error = FALSE;
+     int         l_pbarc = 0;
+     uint64_t    l_tmp =0;
+ 
+@@ -340,12 +347,8 @@ void dcom_tx_slv_outbox_doorbell( void )
+                 l_tmp,
+                 SSX_MICROSECONDS(15));
+ 
+-    if ( l_pbarc != 0 && l_error == FALSE )
+-    {
+-        // Failure occurred
+-        // This is running in a critical interrupt context.  Tracing not allowed!
+-        l_error = TRUE;
+-    }
++    // Set this global so we know to trace this in the non-critical interrupt context
++    G_slave_pbax_rc = l_pbarc;
+ }
+ 
+ #endif //_DCOMSLAVETOMASTER_C
+diff --git a/src/occ/dcom/dcom_service_codes.h b/src/occ/dcom/dcom_service_codes.h
+index c3e90d8..0ffbb4f 100755
+--- a/src/occ/dcom/dcom_service_codes.h
++++ b/src/occ/dcom/dcom_service_codes.h
+@@ -40,6 +40,8 @@ enum dcomModuleId
+     DCOM_MID_TASK_WAIT_FOR_MASTER   =  DCOM_COMP_ID | 0x07,
+     DCOM_MID_ERROR_CHECK            =  DCOM_COMP_ID | 0x08,
+     DCOM_MID_WAIT_FOR_MASTER        =  DCOM_COMP_ID | 0x09,
++    DCOM_MID_PBAX_ERROR_HANDLER     =  DCOM_COMP_ID | 0x0A,
++    DCOM_MID_BUILD_SLV_INBOX        =  DCOM_COMP_ID | 0x0B,
+ };
+ 
+ #endif /* #ifndef _DCOM_SERVICE_CODES_H_ */
+diff --git a/src/occ/occ_service_codes.h b/src/occ/occ_service_codes.h
+index 9b707c7..7e4e150 100644
+--- a/src/occ/occ_service_codes.h
++++ b/src/occ/occ_service_codes.h
+@@ -91,6 +91,10 @@ enum occReasonCode
+     TARGET_FREQ_FAILURE             = 0xB4,
+     /// RTL detected a system checkstop
+     OCC_SYSTEM_HALTED               = 0xB5,
++    ///  Reset PBA Queue due to PBAX Read Failure
++    PBAX_QUEUE_RESET                = 0xBA,
++    ///  PBAX failure sending doorbell to slaves
++    PBAX_ERROR                      = 0xBB,
+     ///  Request to read APSS data failed.
+     APSS_GPE_FAILURE                = 0xC0,
+     /// Connector overcurrent pin still asserted.
+diff --git a/src/occ/occbuildname.c b/src/occ/occbuildname.c
+index 03b52c5..086c3ce 100755
+--- a/src/occ/occbuildname.c
++++ b/src/occ/occbuildname.c
+@@ -34,6 +34,6 @@ volatile const char G_occ_buildname[16] __attribute__((section(".buildname"))) =
+ 
+ #else
+ 
+-volatile const char G_occ_buildname[16] __attribute__((section(".buildname"))) = /*<BuildName>*/  "op_occ_170309a\0"  /*</BuildName>*/ ;
++volatile const char G_occ_buildname[16] __attribute__((section(".buildname"))) = /*<BuildName>*/  "op_occ_170410a\0"  /*</BuildName>*/ ;
+ 
+ #endif
+diff --git a/src/occ/proc/proc_data.c b/src/occ/proc/proc_data.c
+index eb7fe31..74257dd 100755
+--- a/src/occ/proc/proc_data.c
++++ b/src/occ/proc/proc_data.c
+@@ -363,8 +363,8 @@ void task_core_data( task_t * i_task )
+                 if (G_get_per_core_data_max_schedule_intervals[l_current_core] < l_elapsed_us)
+                 {
+                     G_get_per_core_data_max_schedule_intervals[l_current_core] = l_elapsed_us;
+-                    TRAC_INFO("New max get_per_core_data interval: core=%d, interval(us)=%d",
+-                              l_current_core, l_elapsed_us);
++//                    TRAC_INFO("New max get_per_core_data interval: core=%d, interval(us)=%d",
++//                              l_current_core, l_elapsed_us);
+                 }
+                 // Also sniff if the request has actually completed, it is checked above but
+                 // the schedule proceeds regardless which could be dangerous...
+diff --git a/src/occ/pss/apss.c b/src/occ/pss/apss.c
+index 9ba0ed1..5c8e75f 100755
+--- a/src/occ/pss/apss.c
++++ b/src/occ/pss/apss.c
+@@ -307,7 +307,6 @@ void task_apss_start_pwr_meas(struct task *i_self)
+ {
+     int             l_rc                = 0;
+     static bool     L_scheduled         = FALSE;
+-    static bool     L_idle_traced       = FALSE;
+     static bool     L_ffdc_collected    = FALSE;
+ 
+     // Create/schedule GPE_start_pwr_meas_read (non-blocking)
+@@ -317,11 +316,7 @@ void task_apss_start_pwr_meas(struct task *i_self)
+     {
+         if (!async_request_is_idle(&G_meas_start_request.request))
+         {
+-            if (!L_idle_traced)
+-            {
+-                TRAC_ERR("task_apss_start_pwr_meas: request is not idle.");
+-                L_idle_traced = TRUE;
+-            }
++            TRAC_ERR("task_apss_start_pwr_meas: request is not idle.");
+             break;
+         }
+ 
+@@ -455,7 +450,6 @@ void task_apss_continue_pwr_meas(struct task *i_self)
+ {
+     int         l_rc                = 0;
+     static bool L_scheduled         = FALSE;
+-    static bool L_idle_traced       = FALSE;
+     static bool L_ffdc_collected    = FALSE;
+ 
+     // Create/schedule GPE_apss_continue_pwr_meas_read (non-blocking)
+@@ -465,11 +459,7 @@ void task_apss_continue_pwr_meas(struct task *i_self)
+     {
+         if (!async_request_is_idle(&G_meas_cont_request.request))
+         {
+-            if (!L_idle_traced)
+-            {
+-                TRAC_ERR("task_apss_continue_pwr_meas: request is not idle.");
+-                L_idle_traced = TRUE;
+-            }
++            TRAC_ERR("task_apss_continue_pwr_meas: request is not idle.");
+             break;
+         }
+ 
+@@ -672,7 +662,6 @@ void task_apss_complete_pwr_meas(struct task *i_self)
+ {
+     int         l_rc                = 0;
+     static bool L_scheduled         = FALSE;
+-    static bool L_idle_traced       = FALSE;
+     static bool L_ffdc_collected    = FALSE;
+ 
+     // Create/schedule GPE_apss_complete_pwr_meas_read (non-blocking)
+@@ -682,11 +671,7 @@ void task_apss_complete_pwr_meas(struct task *i_self)
+     {
+         if (!async_request_is_idle(&G_meas_complete_request.request))
+         {
+-            if (!L_idle_traced)
+-            {
+-                TRAC_ERR("task_apss_complete_pwr_meas: request is not idle.");
+-                L_idle_traced = TRUE;
+-            }
++            TRAC_ERR("task_apss_complete_pwr_meas: request is not idle.");
+             break;
+         }
+ 
