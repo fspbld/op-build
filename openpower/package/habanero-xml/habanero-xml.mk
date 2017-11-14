@@ -4,7 +4,11 @@
 #
 ################################################################################
 
-HABANERO_XML_VERSION ?= 5565b8fe1feaa4cdb3b296912069c02f46c4cc59
+# pje 11/14/17 - bump from 5565b8f to 6a78496 for op820.20
+HABANERO_XML_VERSION ?= 6a78496
+#
+###5565b8fe1feaa4cdb3b296912069c02f46c4cc59
+
 HABANERO_XML_SITE ?= $(call github,open-power,habanero-xml,$(HABANERO_XML_VERSION))
 
 HABANERO_XML_LICENSE = Apache-2.0
