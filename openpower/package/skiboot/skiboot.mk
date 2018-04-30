@@ -10,9 +10,9 @@
 # after the build started, updated to point to local skiboot repo, which has
 # a reverted commit. Breaks gpu systems:
 # Revert "npu2/hw-procedures: fence bricks on GPU reset"
-SKIBOOT_VERSION = 358e489
+SKIBOOT_VERSION = 6c716ef
 
-SKIBOOT_SITE = /afs/austin/projects/esw/oppnor920/localRepos/skiboot_revert_sw421379/skiboot
+SKIBOOT_SITE = /afs/austin/projects/esw/oppnor920/localRepos/skiboot_revert_sw421379_addstop45/skiboot
 ###########$(call github,open-power,skiboot,$(SKIBOOT_VERSION))
 SKIBOOT_SITE_METHOD=local
 
