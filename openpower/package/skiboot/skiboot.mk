@@ -4,9 +4,19 @@
 #
 ################################################################################
 
-SKIBOOT_VERSION = $(call qstrip,$(BR2_SKIBOOT_VERSION))
+#S#K#IBOOT_VERSION = $(call qstrip,$(BR2_SKIBOOT_VERSION))
+#S#K#IBOOT_SITE = $(call github,open-power,skiboot,$(SKIBOOT_VERSION))
 
-SKIBOOT_SITE = $(call github,open-power,skiboot,$(SKIBOOT_VERSION))
+# after the build started, updated to point to local skiboot repo, which has
+# a reverted commit. Breaks gpu systems:
+# Revert "npu2/hw-procedures: fence bricks on GPU reset"
+SKIBOOT_VERSION = 358e489
+
+SKIBOOT_SITE = /afs/austin/projects/esw/oppnor920/localRepos/skiboot_revert_sw421379/skiboot
+###########$(call github,open-power,skiboot,$(SKIBOOT_VERSION))
+SKIBOOT_SITE_METHOD=local
+
+
 SKIBOOT_LICENSE = Apache-2.0
 SKIBOOT_LICENSE_FILES = LICENCE
 SKIBOOT_INSTALL_IMAGES = YES
